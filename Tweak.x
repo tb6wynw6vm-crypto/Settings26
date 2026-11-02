@@ -15,6 +15,7 @@
 @end
 
 static NSMutableArray *gAppsRows;
+static PSSpecifier *gAppsSpec;
 
 static UIColor *sideBG(void) {
   return [UIColor colorWithRed:0.106 green:0.118 blue:0.133 alpha:1];
@@ -89,6 +90,7 @@ static BOOL hasName(NSArray *a, NSString *n) {
 
 static NSArray *reorder(id owner, NSArray *orig) {
   @try {
+    BOOL incr = (gAppsSpec && [orig containsObject:gAppsSpec]);
     NSUInteger firstIdx = NSNotFound;
     for (NSUInteger i = 0; i < orig.count && firstIdx == NSNotFound; i++) {
       PSSpecifier *s = orig[i];
@@ -121,18 +123,29 @@ static NSArray *reorder(id owner, NSArray *orig) {
     NSMutableArray *rest = [NSMutableArray array];
     for (NSUInteger i = firstIdx; i < orig.count; i++) {
       PSSpecifier *s = orig[i];
+      if (s == gAppsSpec) continue;
       if (s.cellType != 0 && ![used containsObject:s]) [rest addObject:s];
     }
 
+    NSMutableArray *all = [NSMutableArray array];
+    if (incr) {
+      for (PSSpecifier *x in gAppsRows)
+        if (x.cellType != 0 && ![rest containsObject:x]) [all addObject:x];
+    }
+    [all addObjectsFromArray:rest];
+
     PSSpecifier *appsSpec = nil;
     Class ac = appsClass();
-    if (rest.count && ac) {
+    if (all.count && ac) {
       gAppsRows = [NSMutableArray array];
       [gAppsRows addObject:[%c(PSSpecifier) emptyGroupSpecifier]];
-      [gAppsRows addObjectsFromArray:rest];
-      appsSpec = [%c(PSSpecifier) preferenceSpecifierNamed:@"Apps" target:owner set:NULL get:NULL detail:ac cell:2 edit:Nil];
-      [appsSpec setProperty:appsIcon() forKey:@"iconImage"];
-      [appsSpec setProperty:@"S26_APPS" forKey:@"id"];
+      [gAppsRows addObjectsFromArray:all];
+      if (!incr || !gAppsSpec) {
+        gAppsSpec = [%c(PSSpecifier) preferenceSpecifierNamed:@"Apps" target:owner set:NULL get:NULL detail:ac cell:2 edit:Nil];
+        [gAppsSpec setProperty:appsIcon() forKey:@"iconImage"];
+        [gAppsSpec setProperty:@"S26_APPS" forKey:@"id"];
+      }
+      appsSpec = gAppsSpec;
     }
 
     for (NSMutableArray *grp in groups) {
@@ -146,9 +159,9 @@ static NSArray *reorder(id owner, NSArray *orig) {
         [out addObjectsFromArray:fin];
       }
     }
-    if (!appsSpec && rest.count) {
+    if (!appsSpec && all.count) {
       [out addObject:[%c(PSSpecifier) emptyGroupSpecifier]];
-      [out addObjectsFromArray:rest];
+      [out addObjectsFromArray:all];
     }
     return out;
   } @catch (NSException *e) {
@@ -159,12 +172,13 @@ static NSArray *reorder(id owner, NSArray *orig) {
 static id handle(id self, id o) {
   if (![o isKindOfClass:[NSArray class]]) return o;
   NSArray *a = o;
-  if (objc_getAssociatedObject(self, "s26")) return o;
   if (!(hasName(a, @"Wi-Fi") && hasName(a, @"Bluetooth"))) return o;
-  objc_setAssociatedObject(self, "s26", @YES, OBJC_ASSOCIATION_RETAIN);
+  NSNumber *last = objc_getAssociatedObject(self, "s26cnt");
+  if (last && last.unsignedIntegerValue == a.count) return o;
   NSArray *n = reorder(self, a);
   if (n != a) {
     NSMutableArray *m = [n mutableCopy];
+    objc_setAssociatedObject(self, "s26cnt", @(m.count), OBJC_ASSOCIATION_RETAIN);
     [self setSpecifiers:m];
     return m;
   }
@@ -175,23 +189,43 @@ static void styleSidebar(id selfObj) {
   @try {
     UIViewController *vc = (UIViewController *)selfObj;
     UITableView *tv = [selfObj valueForKey:@"table"];
-    vc.view.backgroundColor = sideBG();
-    vc.navigationController.view.backgroundColor = sideBG();
+    UIColor *bg = sideBG();
+    vc.view.backgroundColor = bg;
     if ([tv isKindOfClass:[UITableView class]]) {
-      tv.backgroundColor = sideBG();
+      tv.backgroundColor = bg;
       tv.separatorStyle = UITableViewCellSeparatorStyleNone;
+      tv.sectionHeaderTopPadding = 0;
+      tv.sectionHeaderHeight = 14;
+      tv.sectionFooterHeight = 8;
+    }
+    UINavigationController *nc = vc.navigationController;
+    if (nc) {
+      nc.view.backgroundColor = bg;
+      nc.navigationBar.prefersLargeTitles = NO;
+      if (!objc_getAssociatedObject(nc, "s26nav")) {
+        objc_setAssociatedObject(nc, "s26nav", @YES, OBJC_ASSOCIATION_RETAIN);
+        UINavigationBarAppearance *ap = [UINavigationBarAppearance new];
+        [ap configureWithTransparentBackground];
+        ap.backgroundEffect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterialDark];
+        ap.backgroundColor = [UIColor clearColor];
+        ap.shadowColor = [UIColor clearColor];
+        nc.navigationBar.standardAppearance = ap;
+        nc.navigationBar.scrollEdgeAppearance = ap;
+        nc.navigationBar.compactAppearance = ap;
+      }
     }
     vc.navigationItem.largeTitleDisplayMode = UINavigationItemLargeTitleDisplayModeNever;
-    vc.navigationController.navigationBar.prefersLargeTitles = NO;
+    vc.navigationItem.hidesSearchBarWhenScrolling = NO;
     if (!vc.navigationItem.titleView) vc.navigationItem.titleView = [UIView new];
     UISearchBar *sb = vc.navigationItem.searchController.searchBar;
     if (sb) {
       sb.searchBarStyle = UISearchBarStyleMinimal;
       UISearchTextField *tf = sb.searchTextField;
       tf.backgroundColor = [UIColor colorWithWhite:1 alpha:0.12];
-      tf.layer.cornerRadius = tf.bounds.size.height / 2;
       tf.layer.borderWidth = 1;
       tf.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.28].CGColor;
+      objc_setAssociatedObject(tf, "s26sf", @YES, OBJC_ASSOCIATION_RETAIN);
+      tf.layer.cornerRadius = 22;
       tf.layer.masksToBounds = YES;
     }
   } @catch (NSException *e) {}
@@ -205,22 +239,36 @@ static BOOL isSidebarCell(UITableViewCell *cell) {
   return tv && pc && [tv.delegate isKindOfClass:pc];
 }
 
+%hook UISearchTextField
+- (void)layoutSubviews {
+  %orig;
+  if (objc_getAssociatedObject(self, "s26sf")) {
+    self.layer.cornerRadius = self.bounds.size.height / 2.0;
+    self.layer.masksToBounds = YES;
+  }
+}
+%end
+
 %hook UITableViewCell
 - (void)layoutSubviews {
   %orig;
-  if (objc_getAssociatedObject(self, "s26c")) return;
   if (!isSidebarCell(self)) return;
-  objc_setAssociatedObject(self, "s26c", @YES, OBJC_ASSOCIATION_RETAIN);
-  self.configurationUpdateHandler = ^(UITableViewCell *c, UICellConfigurationState *st) {
-    UIBackgroundConfiguration *cfg = [UIBackgroundConfiguration clearConfiguration];
-    if (st.isSelected || st.isHighlighted) {
-      cfg.backgroundColor = [UIColor colorWithWhite:1 alpha:0.12];
-      cfg.cornerRadius = 24;
-      cfg.backgroundInsets = NSDirectionalEdgeInsetsMake(2, 8, 2, 8);
-    }
-    c.backgroundConfiguration = cfg;
-  };
-  [self setNeedsUpdateConfiguration];
+  self.backgroundColor = [UIColor clearColor];
+  if (self.accessoryType != UITableViewCellAccessoryNone) self.accessoryType = UITableViewCellAccessoryNone;
+  UIView *sel = self.selectedBackgroundView;
+  UIView *pill = [sel viewWithTag:26026];
+  if (!pill) {
+    sel = [UIView new];
+    sel.backgroundColor = [UIColor clearColor];
+    pill = [UIView new];
+    pill.tag = 26026;
+    pill.backgroundColor = [UIColor colorWithWhite:1 alpha:0.14];
+    [sel addSubview:pill];
+    self.selectedBackgroundView = sel;
+  }
+  sel.frame = self.bounds;
+  pill.frame = CGRectInset(sel.bounds, 8, 2);
+  pill.layer.cornerRadius = pill.bounds.size.height / 2.0;
 }
 %end
 
@@ -236,5 +284,15 @@ static BOOL isSidebarCell(UITableViewCell *cell) {
 - (void)viewDidLayoutSubviews {
   %orig;
   styleSidebar(self);
+}
+- (CGFloat)tableView:(UITableView *)tv heightForHeaderInSection:(NSInteger)s {
+  CGFloat h = %orig;
+  if (s > 0 && (h < 0 || h > 14)) return 14;
+  return h;
+}
+- (CGFloat)tableView:(UITableView *)tv heightForFooterInSection:(NSInteger)s {
+  CGFloat h = %orig;
+  if (h < 0 || h > 8) return 8;
+  return h;
 }
 %end
