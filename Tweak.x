@@ -1,6 +1,7 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
 
 @interface PSSpecifier : NSObject
 @property (nonatomic, retain) NSString *name;
