@@ -1,10 +1,17 @@
 #import <Foundation/Foundation.h>
+#import <objc/runtime.h>
 
 @interface PSSpecifier : NSObject
 @property (nonatomic, retain) NSString *name;
 @property (nonatomic) int cellType;
 + (instancetype)emptyGroupSpecifier;
 @end
+
+static void s26log(NSString *s) {
+  NSString *p = @"/var/mobile/Library/Preferences/s26.txt";
+  NSString *old = [NSString stringWithContentsOfFile:p encoding:NSUTF8StringEncoding error:nil] ?: @"";
+  [[old stringByAppendingFormat:@"%@\n", s] writeToFile:p atomically:YES encoding:NSUTF8StringEncoding error:nil];
+}
 
 static NSArray *layout(void) {
   return @[
@@ -29,9 +36,14 @@ static BOOL slotMatches(NSString *slot, NSString *name) {
   return NO;
 }
 
+static BOOL hasName(NSArray *a, NSString *n) {
+  for (PSSpecifier *s in a)
+    if ([s respondsToSelector:@selector(name)] && [s.name isEqualToString:n]) return YES;
+  return NO;
+}
+
 static NSArray *reorder(NSArray *orig) {
   @try {
-    if (![orig isKindOfClass:[NSArray class]] || orig.count < 5) return orig;
     NSUInteger firstIdx = NSNotFound;
     for (NSUInteger i = 0; i < orig.count && firstIdx == NSNotFound; i++) {
       PSSpecifier *s = orig[i];
@@ -71,12 +83,30 @@ static NSArray *reorder(NSArray *orig) {
     }
     return out;
   } @catch (NSException *e) {
+    s26log([NSString stringWithFormat:@"EXC %@", e]);
     return orig;
   }
 }
 
-%hook PSUIPrefsListController
-- (void)setSpecifiers:(NSArray *)specs {
-  %orig(reorder(specs));
+%hook PSListController
+- (id)specifiers {
+  id o = %orig;
+  if ([o isKindOfClass:[NSArray class]] && !objc_getAssociatedObject(self, "s26")) {
+    NSArray *a = o;
+    if (hasName(a, @"Wi-Fi") && hasName(a, @"Bluetooth")) {
+      objc_setAssociatedObject(self, "s26", @YES, OBJC_ASSOCIATION_RETAIN);
+      NSMutableString *log = [NSMutableString stringWithFormat:@"CLASS %@ count=%lu\n", NSStringFromClass([self class]), (unsigned long)a.count];
+      for (PSSpecifier *s in a) [log appendFormat:@"%d | %@\n", s.cellType, s.name];
+      s26log(log);
+      NSArray *n = reorder(a);
+      if (n != a) {
+        [self setSpecifiers:[n mutableCopy]];
+        s26log(@"REORDERED");
+        return %orig;
+      }
+      s26log(@"NO MATCH");
+    }
+  }
+  return o;
 }
 %end
