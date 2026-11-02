@@ -1,4 +1,5 @@
 #import <Foundation/Foundation.h>
+#import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 
 @interface PSSpecifier : NSObject
@@ -11,10 +12,29 @@
 - (void)setSpecifiers:(NSArray *)specs;
 @end
 
+static NSMutableString *gLog;
+static BOOL gShown = NO;
+static int gCalls = 0;
+
 static void s26log(NSString *s) {
-  NSString *p = @"/var/mobile/Library/Preferences/s26.txt";
-  NSString *old = [NSString stringWithContentsOfFile:p encoding:NSUTF8StringEncoding error:nil] ?: @"";
-  [[old stringByAppendingFormat:@"%@\n", s] writeToFile:p atomically:YES encoding:NSUTF8StringEncoding error:nil];
+  if (!gLog) gLog = [NSMutableString string];
+  [gLog appendFormat:@"%@\n", s];
+}
+
+static void s26show(void) {
+  if (gShown) return;
+  gShown = YES;
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    UIViewController *vc = nil;
+    for (UIWindow *w in [UIApplication sharedApplication].windows)
+      if (w.isKeyWindow) vc = w.rootViewController;
+    if (!vc) vc = [UIApplication sharedApplication].windows.firstObject.rootViewController;
+    while (vc.presentedViewController) vc = vc.presentedViewController;
+    NSString *t = gLog.length > 700 ? [gLog substringToIndex:700] : (gLog ?: @"empty");
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Settings26 log" message:t preferredStyle:UIAlertControllerStyleAlert];
+    [a addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+    [vc presentViewController:a animated:YES completion:nil];
+  });
 }
 
 static NSArray *layout(void) {
@@ -95,13 +115,15 @@ static NSArray *reorder(NSArray *orig) {
 %hook PSListController
 - (id)specifiers {
   id o = %orig;
+  s26show();
+  if (gCalls < 8 && [o isKindOfClass:[NSArray class]]) {
+    gCalls++;
+    s26log([NSString stringWithFormat:@"%@ n=%lu wifi=%d bt=%d", NSStringFromClass([self class]), (unsigned long)[(NSArray *)o count], hasName(o, @"Wi-Fi"), hasName(o, @"Bluetooth")]);
+  }
   if ([o isKindOfClass:[NSArray class]] && !objc_getAssociatedObject(self, "s26")) {
     NSArray *a = o;
     if (hasName(a, @"Wi-Fi") && hasName(a, @"Bluetooth")) {
       objc_setAssociatedObject(self, "s26", @YES, OBJC_ASSOCIATION_RETAIN);
-      NSMutableString *log = [NSMutableString stringWithFormat:@"CLASS %@ count=%lu\n", NSStringFromClass([self class]), (unsigned long)a.count];
-      for (PSSpecifier *s in a) [log appendFormat:@"%d | %@\n", s.cellType, s.name];
-      s26log(log);
       NSArray *n = reorder(a);
       if (n != a) {
         [self setSpecifiers:[n mutableCopy]];
@@ -109,6 +131,9 @@ static NSArray *reorder(NSArray *orig) {
         return %orig;
       }
       s26log(@"NO MATCH");
+      NSMutableString *names = [NSMutableString string];
+      for (PSSpecifier *s in a) [names appendFormat:@"%@, ", s.name];
+      s26log(names);
     }
   }
   return o;
