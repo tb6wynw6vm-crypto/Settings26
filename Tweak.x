@@ -14,28 +14,13 @@
 @end
 
 static NSMutableString *gLog;
-static BOOL gShown = NO;
 static int gCalls = 0;
 
-static void s26log(NSString *s) {
+static void plog(NSString *s) {
   if (!gLog) gLog = [NSMutableString string];
   [gLog appendFormat:@"%@\n", s];
-}
-
-static void s26show(void) {
-  if (gShown) return;
-  gShown = YES;
-  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-    UIViewController *vc = nil;
-    for (UIWindow *w in [UIApplication sharedApplication].windows)
-      if (w.isKeyWindow) vc = w.rootViewController;
-    if (!vc) vc = [UIApplication sharedApplication].windows.firstObject.rootViewController;
-    while (vc.presentedViewController) vc = vc.presentedViewController;
-    NSString *t = gLog.length > 700 ? [gLog substringToIndex:700] : (gLog ?: @"empty");
-    UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Settings26 log" message:t preferredStyle:UIAlertControllerStyleAlert];
-    [a addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-    [vc presentViewController:a animated:YES completion:nil];
-  });
+  CFPreferencesSetAppValue(CFSTR("log"), (__bridge CFStringRef)[gLog copy], CFSTR("com.settings26.log"));
+  CFPreferencesAppSynchronize(CFSTR("com.settings26.log"));
 }
 
 static NSArray *layout(void) {
@@ -108,35 +93,59 @@ static NSArray *reorder(NSArray *orig) {
     }
     return out;
   } @catch (NSException *e) {
-    s26log([NSString stringWithFormat:@"EXC %@", e]);
+    plog([NSString stringWithFormat:@"EXC %@", e]);
     return orig;
   }
 }
 
+static id handle(id self, id o) {
+  if (![o isKindOfClass:[NSArray class]]) return o;
+  NSArray *a = o;
+  if (gCalls < 12) {
+    gCalls++;
+    plog([NSString stringWithFormat:@"%@ n=%lu wifi=%d bt=%d", NSStringFromClass([self class]), (unsigned long)a.count, hasName(a, @"Wi-Fi"), hasName(a, @"Bluetooth")]);
+  }
+  if (objc_getAssociatedObject(self, "s26")) return o;
+  if (!(hasName(a, @"Wi-Fi") && hasName(a, @"Bluetooth"))) return o;
+  objc_setAssociatedObject(self, "s26", @YES, OBJC_ASSOCIATION_RETAIN);
+  NSArray *n = reorder(a);
+  if (n != a) {
+    NSMutableArray *m = [n mutableCopy];
+    [self setSpecifiers:m];
+    plog(@"REORDERED");
+    return m;
+  }
+  NSMutableString *names = [NSMutableString stringWithString:@"NO MATCH: "];
+  for (PSSpecifier *s in a) [names appendFormat:@"%@, ", s.name];
+  plog(names);
+  return o;
+}
+
+%hook PSUIPrefsListController
+- (id)specifiers {
+  id o = %orig;
+  return handle(self, o);
+}
+%end
+
 %hook PSListController
 - (id)specifiers {
   id o = %orig;
-  s26show();
-  if (gCalls < 8 && [o isKindOfClass:[NSArray class]]) {
-    gCalls++;
-    s26log([NSString stringWithFormat:@"%@ n=%lu wifi=%d bt=%d", NSStringFromClass([self class]), (unsigned long)[(NSArray *)o count], hasName(o, @"Wi-Fi"), hasName(o, @"Bluetooth")]);
-  }
-  if ([o isKindOfClass:[NSArray class]] && !objc_getAssociatedObject(self, "s26")) {
-    NSArray *a = o;
-    if (hasName(a, @"Wi-Fi") && hasName(a, @"Bluetooth")) {
-      objc_setAssociatedObject(self, "s26", @YES, OBJC_ASSOCIATION_RETAIN);
-      NSArray *n = reorder(a);
-      if (n != a) {
-        [self setSpecifiers:[n mutableCopy]];
-        s26log(@"REORDERED");
-        return %orig;
-      }
-      s26log(@"NO MATCH");
-      NSMutableString *names = [NSMutableString string];
-      for (PSSpecifier *s in a) [names appendFormat:@"%@, ", s.name];
-      s26log(names);
-    }
-  }
-  return o;
+  return handle(self, o);
 }
 %end
+
+%ctor {
+  plog(@"loaded");
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    UIViewController *vc = nil;
+    for (UIWindow *w in [UIApplication sharedApplication].windows)
+      if (w.isKeyWindow) vc = w.rootViewController;
+    if (!vc) vc = [UIApplication sharedApplication].windows.firstObject.rootViewController;
+    while (vc.presentedViewController) vc = vc.presentedViewController;
+    NSString *t = gLog.length > 700 ? [gLog substringToIndex:700] : (gLog ?: @"empty");
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Settings26 log" message:t preferredStyle:UIAlertControllerStyleAlert];
+    [a addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+    [vc presentViewController:a animated:YES completion:nil];
+  });
+}
