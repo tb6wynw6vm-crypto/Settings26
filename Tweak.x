@@ -7,6 +7,10 @@
 + (instancetype)emptyGroupSpecifier;
 @end
 
+@interface PSListController : NSObject
+- (void)setSpecifiers:(NSArray *)specs;
+@end
+
 static void s26log(NSString *s) {
   NSString *p = @"/var/mobile/Library/Preferences/s26.txt";
   NSString *old = [NSString stringWithContentsOfFile:p encoding:NSUTF8StringEncoding error:nil] ?: @"";
