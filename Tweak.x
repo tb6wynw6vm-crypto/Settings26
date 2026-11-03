@@ -2,6 +2,9 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 
+// عرض قائمة الإعدادات اليسار (بالنقاط). الأيباد 11" الأصلي = 320
+#define SIDEBAR_W 320.0
+
 @interface PSSpecifier : NSObject
 @property (nonatomic, retain) NSString *name;
 @property (nonatomic) int cellType;
@@ -30,7 +33,7 @@ static NSMutableArray *gAppsRows;
 static PSSpecifier *gAppsSpec;
 
 static UIColor *sideBG(void) {
-  return [UIColor colorWithRed:0.106 green:0.118 blue:0.133 alpha:1];
+  return [UIColor colorWithRed:25/255.0 green:29/255.0 blue:32/255.0 alpha:1];
 }
 
 static UIImage *appsIcon(void) {
@@ -50,14 +53,14 @@ static UIImage *appsIcon(void) {
 }
 
 static UIImage *fieldImage(void) {
-  CGFloat h = 36;
+  CGFloat h = 38;
   UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(h * 2, h)];
   UIImage *img = [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
     CGRect rc = CGRectMake(0.5, 0.5, h * 2 - 1, h - 1);
     UIBezierPath *p = [UIBezierPath bezierPathWithRoundedRect:rc cornerRadius:(h - 1) / 2];
-    [[UIColor colorWithWhite:1 alpha:0.12] setFill];
+    [[UIColor colorWithWhite:1 alpha:0.15] setFill];
     [p fill];
-    [[UIColor colorWithWhite:1 alpha:0.28] setStroke];
+    [[UIColor colorWithWhite:1 alpha:0.30] setStroke];
     p.lineWidth = 1;
     [p stroke];
   }];
@@ -224,11 +227,18 @@ static void styleSidebar(id selfObj) {
       tv.backgroundColor = bg;
       tv.separatorStyle = UITableViewCellSeparatorStyleNone;
       tv.sectionHeaderTopPadding = 0;
-      tv.sectionHeaderHeight = 14;
-      tv.sectionFooterHeight = 8;
+      tv.sectionHeaderHeight = 10;
+      tv.sectionFooterHeight = 0.01;
       tv.keyboardDismissMode = UIScrollViewKeyboardDismissModeOnDrag;
       tv.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentAlways;
       if (!CGRectEqualToRect(tv.frame, vc.view.bounds)) tv.frame = vc.view.bounds;
+    }
+    UISplitViewController *sv = vc.splitViewController;
+    if (sv && !objc_getAssociatedObject(sv, "s26sv")) {
+      objc_setAssociatedObject(sv, "s26sv", @YES, OBJC_ASSOCIATION_RETAIN);
+      sv.minimumPrimaryColumnWidth = SIDEBAR_W;
+      sv.maximumPrimaryColumnWidth = SIDEBAR_W;
+      sv.preferredPrimaryColumnWidth = SIDEBAR_W;
     }
     UINavigationController *nc = vc.navigationController;
     if (nc) {
@@ -340,15 +350,26 @@ static BOOL isSidebarCell(UITableViewCell *cell) {
     sel.backgroundColor = [UIColor clearColor];
     pill = [S26Pill new];
     pill.tag = 26026;
-    pill.backgroundColor = [UIColor colorWithWhite:1 alpha:0.14];
+    pill.backgroundColor = [UIColor colorWithWhite:1 alpha:0.085];
     [sel addSubview:pill];
     self.selectedBackgroundView = sel;
   }
   sel.frame = self.bounds;
   UITableView *tv = cellTV(self);
   CGRect full = [self convertRect:tv.bounds fromView:tv];
-  pill.frame = CGRectMake(full.origin.x + 10, 2, full.size.width - 20, self.bounds.size.height - 4);
+  pill.frame = CGRectMake(full.origin.x + 22, 0, full.size.width - 44, self.bounds.size.height);
   [pill setNeedsLayout];
+
+  UIImageView *iv = self.imageView;
+  if (iv.image && iv.bounds.size.width > 0 && iv.bounds.size.width <= 34) {
+    CGRect r = [iv convertRect:iv.bounds toView:tv];
+    CGFloat dx = 28.5 - r.origin.x;
+    if (dx < 0) {
+      CGRect f = iv.frame; f.origin.x += dx; iv.frame = f;
+      UILabel *tl = self.textLabel;
+      if (tl) { CGRect lf = tl.frame; lf.origin.x += dx; tl.frame = lf; }
+    }
+  }
 }
 %end
 
@@ -375,13 +396,9 @@ static BOOL isSidebarCell(UITableViewCell *cell) {
   });
 }
 - (CGFloat)tableView:(UITableView *)tv heightForHeaderInSection:(NSInteger)s {
-  CGFloat h = %orig;
-  if (s > 0 && (h < 0 || h > 14)) return 14;
-  return h;
+  return 10;
 }
 - (CGFloat)tableView:(UITableView *)tv heightForFooterInSection:(NSInteger)s {
-  CGFloat h = %orig;
-  if (h < 0 || h > 8) return 8;
-  return h;
+  return 0.01;
 }
 %end
