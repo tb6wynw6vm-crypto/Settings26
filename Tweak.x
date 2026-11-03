@@ -2,9 +2,6 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 
-// قوة التغبيش للشريط العلوي: 0 = شفاف تماماً، 1 = مغبش كامل
-#define BAR_BLUR_ALPHA 0.4
-
 @interface PSSpecifier : NSObject
 @property (nonatomic, retain) NSString *name;
 @property (nonatomic) int cellType;
@@ -17,6 +14,16 @@
 - (void)setSpecifiers:(NSArray *)specs;
 - (NSIndexPath *)indexPathForSpecifier:(id)spec;
 - (NSArray *)specifiers;
+@end
+
+@interface S26Pill : UIView
+@end
+@implementation S26Pill
+- (void)layoutSubviews {
+  [super layoutSubviews];
+  self.layer.cornerRadius = self.bounds.size.height / 2.0;
+  self.layer.masksToBounds = YES;
+}
 @end
 
 static NSMutableArray *gAppsRows;
@@ -205,23 +212,14 @@ static id handle(id self, id o) {
   return o;
 }
 
-static void softenBar(UIView *bar) {
-  for (UIView *bg in bar.subviews) {
-    if ([NSStringFromClass([bg class]) containsString:@"BarBackground"]) {
-      for (UIView *s in bg.subviews)
-        if ([s isKindOfClass:[UIVisualEffectView class]]) s.alpha = BAR_BLUR_ALPHA;
-    }
-  }
-}
-
 static void styleSidebar(id selfObj) {
   @try {
     UIViewController *vc = (UIViewController *)selfObj;
     UITableView *tv = [selfObj valueForKey:@"table"];
     UIColor *bg = sideBG();
     vc.view.backgroundColor = bg;
-    if (vc.edgesForExtendedLayout != UIRectEdgeAll) vc.edgesForExtendedLayout = UIRectEdgeAll;
-    if (!vc.extendedLayoutIncludesOpaqueBars) vc.extendedLayoutIncludesOpaqueBars = YES;
+    vc.edgesForExtendedLayout = UIRectEdgeAll;
+    vc.extendedLayoutIncludesOpaqueBars = YES;
     if ([tv isKindOfClass:[UITableView class]]) {
       tv.backgroundColor = bg;
       tv.separatorStyle = UITableViewCellSeparatorStyleNone;
@@ -229,24 +227,29 @@ static void styleSidebar(id selfObj) {
       tv.sectionHeaderHeight = 14;
       tv.sectionFooterHeight = 8;
       tv.keyboardDismissMode = UIScrollViewKeyboardDismissModeOnDrag;
+      tv.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentAlways;
+      if (!CGRectEqualToRect(tv.frame, vc.view.bounds)) tv.frame = vc.view.bounds;
     }
     UINavigationController *nc = vc.navigationController;
     if (nc) {
       nc.view.backgroundColor = bg;
       nc.navigationBar.prefersLargeTitles = NO;
-      if (!nc.navigationBar.translucent) nc.navigationBar.translucent = YES;
+      nc.navigationBar.translucent = YES;
       if (!objc_getAssociatedObject(nc, "s26nav")) {
         objc_setAssociatedObject(nc, "s26nav", @YES, OBJC_ASSOCIATION_RETAIN);
-        UINavigationBarAppearance *ap = [UINavigationBarAppearance new];
-        [ap configureWithTransparentBackground];
-        ap.backgroundEffect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterialDark];
-        ap.backgroundColor = [UIColor clearColor];
-        ap.shadowColor = [UIColor clearColor];
-        nc.navigationBar.standardAppearance = ap;
-        nc.navigationBar.scrollEdgeAppearance = ap;
-        nc.navigationBar.compactAppearance = ap;
+        UINavigationBarAppearance *edge = [UINavigationBarAppearance new];
+        [edge configureWithOpaqueBackground];
+        edge.backgroundColor = bg;
+        edge.shadowColor = [UIColor clearColor];
+        UINavigationBarAppearance *std = [UINavigationBarAppearance new];
+        [std configureWithTransparentBackground];
+        std.backgroundEffect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterialDark];
+        std.backgroundColor = [UIColor clearColor];
+        std.shadowColor = [UIColor clearColor];
+        nc.navigationBar.standardAppearance = std;
+        nc.navigationBar.compactAppearance = std;
+        nc.navigationBar.scrollEdgeAppearance = edge;
       }
-      softenBar(nc.navigationBar);
     }
     vc.navigationItem.largeTitleDisplayMode = UINavigationItemLargeTitleDisplayModeNever;
     vc.navigationItem.hidesSearchBarWhenScrolling = NO;
@@ -331,33 +334,21 @@ static BOOL isSidebarCell(UITableViewCell *cell) {
   self.backgroundColor = [UIColor clearColor];
   if (self.accessoryType != UITableViewCellAccessoryNone) self.accessoryType = UITableViewCellAccessoryNone;
   UIView *sel = self.selectedBackgroundView;
-  UIView *pill = [sel viewWithTag:26026];
-  if (!pill) {
+  S26Pill *pill = (S26Pill *)[sel viewWithTag:26026];
+  if (![pill isKindOfClass:[S26Pill class]]) {
     sel = [UIView new];
     sel.backgroundColor = [UIColor clearColor];
-    sel.clipsToBounds = NO;
-    pill = [UIView new];
+    pill = [S26Pill new];
     pill.tag = 26026;
     pill.backgroundColor = [UIColor colorWithWhite:1 alpha:0.14];
     [sel addSubview:pill];
     self.selectedBackgroundView = sel;
   }
-  self.clipsToBounds = NO;
   sel.frame = self.bounds;
   UITableView *tv = cellTV(self);
   CGRect full = [self convertRect:tv.bounds fromView:tv];
   pill.frame = CGRectMake(full.origin.x + 10, 2, full.size.width - 20, self.bounds.size.height - 4);
-  pill.layer.cornerRadius = 1000;
-  pill.layer.cornerCurve = kCACornerCurveCircular;
-  pill.layer.masksToBounds = NO;
-}
-- (void)setSelected:(BOOL)sel animated:(BOOL)anim {
-  %orig;
-  if (isSidebarCell(self)) [self setNeedsLayout];
-}
-- (void)setHighlighted:(BOOL)h animated:(BOOL)anim {
-  %orig;
-  if (isSidebarCell(self)) [self setNeedsLayout];
+  [pill setNeedsLayout];
 }
 %end
 
