@@ -12,6 +12,8 @@
 
 @interface PSListController : NSObject
 - (void)setSpecifiers:(NSArray *)specs;
+- (NSIndexPath *)indexPathForSpecifier:(id)spec;
+- (NSArray *)specifiers;
 @end
 
 static NSMutableArray *gAppsRows;
@@ -35,6 +37,21 @@ static UIImage *appsIcon(void) {
       [[UIBezierPath bezierPathWithRoundedRect:rc cornerRadius:1.5] fill];
     }
   }];
+}
+
+static UIImage *fieldImage(void) {
+  CGFloat h = 36;
+  UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(h * 2, h)];
+  UIImage *img = [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+    CGRect rc = CGRectMake(0.5, 0.5, h * 2 - 1, h - 1);
+    UIBezierPath *p = [UIBezierPath bezierPathWithRoundedRect:rc cornerRadius:(h - 1) / 2];
+    [[UIColor colorWithWhite:1 alpha:0.12] setFill];
+    [p fill];
+    [[UIColor colorWithWhite:1 alpha:0.28] setStroke];
+    p.lineWidth = 1;
+    [p stroke];
+  }];
+  return [img resizableImageWithCapInsets:UIEdgeInsetsMake(0, h / 2, 0, h / 2) resizingMode:UIImageResizingModeStretch];
 }
 
 static id s26Specifiers(id self, SEL _cmd) {
@@ -191,17 +208,21 @@ static void styleSidebar(id selfObj) {
     UITableView *tv = [selfObj valueForKey:@"table"];
     UIColor *bg = sideBG();
     vc.view.backgroundColor = bg;
+    if (vc.edgesForExtendedLayout != UIRectEdgeAll) vc.edgesForExtendedLayout = UIRectEdgeAll;
+    if (!vc.extendedLayoutIncludesOpaqueBars) vc.extendedLayoutIncludesOpaqueBars = YES;
     if ([tv isKindOfClass:[UITableView class]]) {
       tv.backgroundColor = bg;
       tv.separatorStyle = UITableViewCellSeparatorStyleNone;
       tv.sectionHeaderTopPadding = 0;
       tv.sectionHeaderHeight = 14;
       tv.sectionFooterHeight = 8;
+      tv.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentAutomatic;
     }
     UINavigationController *nc = vc.navigationController;
     if (nc) {
       nc.view.backgroundColor = bg;
       nc.navigationBar.prefersLargeTitles = NO;
+      if (!nc.navigationBar.translucent) nc.navigationBar.translucent = YES;
       if (!objc_getAssociatedObject(nc, "s26nav")) {
         objc_setAssociatedObject(nc, "s26nav", @YES, OBJC_ASSOCIATION_RETAIN);
         UINavigationBarAppearance *ap = [UINavigationBarAppearance new];
@@ -218,36 +239,49 @@ static void styleSidebar(id selfObj) {
     vc.navigationItem.hidesSearchBarWhenScrolling = NO;
     if (!vc.navigationItem.titleView) vc.navigationItem.titleView = [UIView new];
     UISearchBar *sb = vc.navigationItem.searchController.searchBar;
-    if (sb) {
+    if (sb && !objc_getAssociatedObject(sb, "s26sb")) {
+      objc_setAssociatedObject(sb, "s26sb", @YES, OBJC_ASSOCIATION_RETAIN);
       sb.searchBarStyle = UISearchBarStyleMinimal;
-      UISearchTextField *tf = sb.searchTextField;
-      tf.backgroundColor = [UIColor colorWithWhite:1 alpha:0.12];
-      tf.layer.borderWidth = 1;
-      tf.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.28].CGColor;
-      objc_setAssociatedObject(tf, "s26sf", @YES, OBJC_ASSOCIATION_RETAIN);
-      tf.layer.cornerRadius = 22;
-      tf.layer.masksToBounds = YES;
+      [sb setSearchFieldBackgroundImage:fieldImage() forState:UIControlStateNormal];
+      sb.searchTextField.backgroundColor = [UIColor clearColor];
+      sb.searchTextField.layer.borderWidth = 0;
     }
   } @catch (NSException *e) {}
 }
 
-static BOOL isSidebarCell(UITableViewCell *cell) {
+static void selectCurrent(id selfObj) {
+  @try {
+    UIViewController *vc = (UIViewController *)selfObj;
+    UITableView *tv = [selfObj valueForKey:@"table"];
+    if (![tv isKindOfClass:[UITableView class]] || tv.indexPathForSelectedRow) return;
+    UISplitViewController *sv = vc.splitViewController;
+    if (!sv || sv.viewControllers.count < 2) return;
+    UIViewController *det = sv.viewControllers.lastObject;
+    if ([det isKindOfClass:[UINavigationController class]])
+      det = ((UINavigationController *)det).viewControllers.firstObject;
+    NSString *t = det.title.length ? det.title : det.navigationItem.title;
+    if (!t.length) return;
+    for (PSSpecifier *s in [(PSListController *)selfObj specifiers]) {
+      if (s.cellType != 0 && [s.name isEqualToString:t]) {
+        NSIndexPath *ip = [(PSListController *)selfObj indexPathForSpecifier:s];
+        if (ip) [tv selectRowAtIndexPath:ip animated:NO scrollPosition:UITableViewScrollPositionNone];
+        break;
+      }
+    }
+  } @catch (NSException *e) {}
+}
+
+static UITableView *cellTV(UITableViewCell *cell) {
   UIView *v = cell.superview;
   while (v && ![v isKindOfClass:[UITableView class]]) v = v.superview;
-  UITableView *tv = (UITableView *)v;
+  return (UITableView *)v;
+}
+
+static BOOL isSidebarCell(UITableViewCell *cell) {
+  UITableView *tv = cellTV(cell);
   Class pc = NSClassFromString(@"PSUIPrefsListController");
   return tv && pc && [tv.delegate isKindOfClass:pc];
 }
-
-%hook UISearchTextField
-- (void)layoutSubviews {
-  %orig;
-  if (objc_getAssociatedObject(self, "s26sf")) {
-    self.layer.cornerRadius = self.bounds.size.height / 2.0;
-    self.layer.masksToBounds = YES;
-  }
-}
-%end
 
 %hook UITableViewCell
 - (void)layoutSubviews {
@@ -260,14 +294,18 @@ static BOOL isSidebarCell(UITableViewCell *cell) {
   if (!pill) {
     sel = [UIView new];
     sel.backgroundColor = [UIColor clearColor];
+    sel.clipsToBounds = NO;
     pill = [UIView new];
     pill.tag = 26026;
     pill.backgroundColor = [UIColor colorWithWhite:1 alpha:0.14];
     [sel addSubview:pill];
     self.selectedBackgroundView = sel;
   }
+  self.clipsToBounds = NO;
   sel.frame = self.bounds;
-  pill.frame = CGRectInset(sel.bounds, 8, 2);
+  UITableView *tv = cellTV(self);
+  CGRect full = [self convertRect:tv.bounds fromView:tv];
+  pill.frame = CGRectMake(full.origin.x + 10, 2, full.size.width - 20, self.bounds.size.height - 4);
   pill.layer.cornerRadius = pill.bounds.size.height / 2.0;
 }
 %end
@@ -284,6 +322,15 @@ static BOOL isSidebarCell(UITableViewCell *cell) {
 - (void)viewDidLayoutSubviews {
   %orig;
   styleSidebar(self);
+}
+- (void)viewDidAppear:(BOOL)animated {
+  %orig;
+  selectCurrent(self);
+  __weak id ws = self;
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    id s = ws;
+    if (s) selectCurrent(s);
+  });
 }
 - (CGFloat)tableView:(UITableView *)tv heightForHeaderInSection:(NSInteger)s {
   CGFloat h = %orig;
