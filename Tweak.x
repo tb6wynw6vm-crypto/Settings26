@@ -2,6 +2,9 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 
+// قوة التغبيش للشريط العلوي: 0 = شفاف تماماً، 1 = مغبش كامل
+#define BAR_BLUR_ALPHA 0.4
+
 @interface PSSpecifier : NSObject
 @property (nonatomic, retain) NSString *name;
 @property (nonatomic) int cellType;
@@ -202,6 +205,15 @@ static id handle(id self, id o) {
   return o;
 }
 
+static void softenBar(UIView *bar) {
+  for (UIView *bg in bar.subviews) {
+    if ([NSStringFromClass([bg class]) containsString:@"BarBackground"]) {
+      for (UIView *s in bg.subviews)
+        if ([s isKindOfClass:[UIVisualEffectView class]]) s.alpha = BAR_BLUR_ALPHA;
+    }
+  }
+}
+
 static void styleSidebar(id selfObj) {
   @try {
     UIViewController *vc = (UIViewController *)selfObj;
@@ -216,7 +228,7 @@ static void styleSidebar(id selfObj) {
       tv.sectionHeaderTopPadding = 0;
       tv.sectionHeaderHeight = 14;
       tv.sectionFooterHeight = 8;
-      tv.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentAutomatic;
+      tv.keyboardDismissMode = UIScrollViewKeyboardDismissModeOnDrag;
     }
     UINavigationController *nc = vc.navigationController;
     if (nc) {
@@ -234,17 +246,35 @@ static void styleSidebar(id selfObj) {
         nc.navigationBar.scrollEdgeAppearance = ap;
         nc.navigationBar.compactAppearance = ap;
       }
+      softenBar(nc.navigationBar);
     }
     vc.navigationItem.largeTitleDisplayMode = UINavigationItemLargeTitleDisplayModeNever;
     vc.navigationItem.hidesSearchBarWhenScrolling = NO;
     if (!vc.navigationItem.titleView) vc.navigationItem.titleView = [UIView new];
-    UISearchBar *sb = vc.navigationItem.searchController.searchBar;
+
+    UISearchController *sc = vc.navigationItem.searchController;
+    if (sc) {
+      sc.hidesNavigationBarDuringPresentation = NO;
+      sc.automaticallyShowsCancelButton = NO;
+    }
+    UISearchBar *sb = sc.searchBar;
     if (sb && !objc_getAssociatedObject(sb, "s26sb")) {
       objc_setAssociatedObject(sb, "s26sb", @YES, OBJC_ASSOCIATION_RETAIN);
       sb.searchBarStyle = UISearchBarStyleMinimal;
+      sb.showsCancelButton = NO;
       [sb setSearchFieldBackgroundImage:fieldImage() forState:UIControlStateNormal];
       sb.searchTextField.backgroundColor = [UIColor clearColor];
       sb.searchTextField.layer.borderWidth = 0;
+    }
+    if (!objc_getAssociatedObject(vc, "s26kb")) {
+      objc_setAssociatedObject(vc, "s26kb", @YES, OBJC_ASSOCIATION_RETAIN);
+      __weak UIViewController *wvc = vc;
+      [[NSNotificationCenter defaultCenter] addObserverForName:UIKeyboardDidHideNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *n) {
+        UIViewController *v = wvc;
+        if (!v) return;
+        UISearchController *c = v.navigationItem.searchController;
+        if (c && c.isActive && c.searchBar.text.length == 0) c.active = NO;
+      }];
     }
   } @catch (NSException *e) {}
 }
@@ -283,6 +313,17 @@ static BOOL isSidebarCell(UITableViewCell *cell) {
   return tv && pc && [tv.delegate isKindOfClass:pc];
 }
 
+%hook UISearchBar
+- (void)setShowsCancelButton:(BOOL)s {
+  if (objc_getAssociatedObject(self, "s26sb")) s = NO;
+  %orig(s);
+}
+- (void)setShowsCancelButton:(BOOL)s animated:(BOOL)a {
+  if (objc_getAssociatedObject(self, "s26sb")) s = NO;
+  %orig(s, a);
+}
+%end
+
 %hook UITableViewCell
 - (void)layoutSubviews {
   %orig;
@@ -306,7 +347,17 @@ static BOOL isSidebarCell(UITableViewCell *cell) {
   UITableView *tv = cellTV(self);
   CGRect full = [self convertRect:tv.bounds fromView:tv];
   pill.frame = CGRectMake(full.origin.x + 10, 2, full.size.width - 20, self.bounds.size.height - 4);
-  pill.layer.cornerRadius = pill.bounds.size.height / 2.0;
+  pill.layer.cornerRadius = 1000;
+  pill.layer.cornerCurve = kCACornerCurveCircular;
+  pill.layer.masksToBounds = NO;
+}
+- (void)setSelected:(BOOL)sel animated:(BOOL)anim {
+  %orig;
+  if (isSidebarCell(self)) [self setNeedsLayout];
+}
+- (void)setHighlighted:(BOOL)h animated:(BOOL)anim {
+  %orig;
+  if (isSidebarCell(self)) [self setNeedsLayout];
 }
 %end
 
