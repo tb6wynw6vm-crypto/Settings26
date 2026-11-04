@@ -2,8 +2,10 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 
-// عرض قائمة الإعدادات اليسار (بالنقاط). الأيباد 11" الأصلي = 320
+// عرض قائمة الإعدادات اليسار (بالنقاط)
 #define SIDEBAR_W 320.0
+// إنزال السيرش (بالنقاط)
+#define SEARCH_DY 11.0
 
 @interface PSSpecifier : NSObject
 @property (nonatomic, retain) NSString *name;
@@ -50,21 +52,6 @@ static UIImage *appsIcon(void) {
       [[UIBezierPath bezierPathWithRoundedRect:rc cornerRadius:1.5] fill];
     }
   }];
-}
-
-static UIImage *fieldImage(void) {
-  CGFloat h = 38;
-  UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(h * 2, h)];
-  UIImage *img = [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
-    CGRect rc = CGRectMake(0.5, 0.5, h * 2 - 1, h - 1);
-    UIBezierPath *p = [UIBezierPath bezierPathWithRoundedRect:rc cornerRadius:(h - 1) / 2];
-    [[UIColor colorWithWhite:1 alpha:0.15] setFill];
-    [p fill];
-    [[UIColor colorWithWhite:1 alpha:0.30] setStroke];
-    p.lineWidth = 1;
-    [p stroke];
-  }];
-  return [img resizableImageWithCapInsets:UIEdgeInsetsMake(0, h / 2, 0, h / 2) resizingMode:UIImageResizingModeStretch];
 }
 
 static id s26Specifiers(id self, SEL _cmd) {
@@ -254,7 +241,7 @@ static void styleSidebar(id selfObj) {
         UINavigationBarAppearance *std = [UINavigationBarAppearance new];
         [std configureWithTransparentBackground];
         std.backgroundEffect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterialDark];
-        std.backgroundColor = [UIColor clearColor];
+        std.backgroundColor = [UIColor colorWithRed:25/255.0 green:29/255.0 blue:32/255.0 alpha:0.78];
         std.shadowColor = [UIColor clearColor];
         nc.navigationBar.standardAppearance = std;
         nc.navigationBar.compactAppearance = std;
@@ -271,13 +258,21 @@ static void styleSidebar(id selfObj) {
       sc.automaticallyShowsCancelButton = NO;
     }
     UISearchBar *sb = sc.searchBar;
-    if (sb && !objc_getAssociatedObject(sb, "s26sb")) {
-      objc_setAssociatedObject(sb, "s26sb", @YES, OBJC_ASSOCIATION_RETAIN);
-      sb.searchBarStyle = UISearchBarStyleMinimal;
-      sb.showsCancelButton = NO;
-      [sb setSearchFieldBackgroundImage:fieldImage() forState:UIControlStateNormal];
-      sb.searchTextField.backgroundColor = [UIColor clearColor];
-      sb.searchTextField.layer.borderWidth = 0;
+    if (sb) {
+      if (!objc_getAssociatedObject(sb, "s26sb")) {
+        objc_setAssociatedObject(sb, "s26sb", @YES, OBJC_ASSOCIATION_RETAIN);
+        sb.searchBarStyle = UISearchBarStyleMinimal;
+        sb.showsCancelButton = NO;
+        [sb setSearchFieldBackgroundImage:[UIImage new] forState:UIControlStateNormal];
+      }
+      UISearchTextField *tf = sb.searchTextField;
+      objc_setAssociatedObject(tf, "s26sf", @YES, OBJC_ASSOCIATION_RETAIN);
+      tf.backgroundColor = [UIColor colorWithWhite:1 alpha:0.15];
+      tf.layer.borderWidth = 1;
+      tf.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.35].CGColor;
+      tf.layer.cornerRadius = tf.bounds.size.height / 2.0;
+      tf.layer.masksToBounds = YES;
+      tf.transform = CGAffineTransformMakeTranslation(0, SEARCH_DY);
     }
     if (!objc_getAssociatedObject(vc, "s26kb")) {
       objc_setAssociatedObject(vc, "s26kb", @YES, OBJC_ASSOCIATION_RETAIN);
@@ -314,14 +309,14 @@ static void selectCurrent(id selfObj) {
   } @catch (NSException *e) {}
 }
 
-static UITableView *cellTV(UITableViewCell *cell) {
-  UIView *v = cell.superview;
-  while (v && ![v isKindOfClass:[UITableView class]]) v = v.superview;
-  return (UITableView *)v;
+static UITableView *tvOf(UIView *v) {
+  UIView *p = v.superview;
+  while (p && ![p isKindOfClass:[UITableView class]]) p = p.superview;
+  return (UITableView *)p;
 }
 
-static BOOL isSidebarCell(UITableViewCell *cell) {
-  UITableView *tv = cellTV(cell);
+static BOOL inSidebar(UIView *v) {
+  UITableView *tv = tvOf(v);
   Class pc = NSClassFromString(@"PSUIPrefsListController");
   return tv && pc && [tv.delegate isKindOfClass:pc];
 }
@@ -337,12 +332,32 @@ static BOOL isSidebarCell(UITableViewCell *cell) {
 }
 %end
 
+%hook UISearchTextField
+- (void)layoutSubviews {
+  %orig;
+  if (objc_getAssociatedObject(self, "s26sf")) {
+    self.layer.cornerRadius = self.bounds.size.height / 2.0;
+    self.layer.masksToBounds = YES;
+  }
+}
+%end
+
+%hook UISwitch
+- (void)layoutSubviews {
+  %orig;
+  if (inSidebar(self) && CGAffineTransformIsIdentity(self.transform))
+    self.transform = CGAffineTransformMakeScale(1.216, 0.887);
+}
+%end
+
 %hook UITableViewCell
 - (void)layoutSubviews {
   %orig;
-  if (!isSidebarCell(self)) return;
+  if (!inSidebar(self)) return;
+  UITableView *tv = tvOf(self);
   self.backgroundColor = [UIColor clearColor];
   if (self.accessoryType != UITableViewCellAccessoryNone) self.accessoryType = UITableViewCellAccessoryNone;
+
   UIView *sel = self.selectedBackgroundView;
   S26Pill *pill = (S26Pill *)[sel viewWithTag:26026];
   if (![pill isKindOfClass:[S26Pill class]]) {
@@ -355,19 +370,34 @@ static BOOL isSidebarCell(UITableViewCell *cell) {
     self.selectedBackgroundView = sel;
   }
   sel.frame = self.bounds;
-  UITableView *tv = cellTV(self);
   CGRect full = [self convertRect:tv.bounds fromView:tv];
-  pill.frame = CGRectMake(full.origin.x + 22, 0, full.size.width - 44, self.bounds.size.height);
+  CGFloat ph = 51.0;
+  pill.frame = CGRectMake(full.origin.x + 22, (self.bounds.size.height - ph) / 2.0, full.size.width - 44, ph);
   [pill setNeedsLayout];
 
   UIImageView *iv = self.imageView;
-  if (iv.image && iv.bounds.size.width > 0 && iv.bounds.size.width <= 34) {
+  BOOL hasIcon = (iv.image && iv.bounds.size.width > 0 && iv.bounds.size.width <= 34);
+  BOOL bigImage = (iv.image && iv.bounds.size.width > 34);
+  if (hasIcon) {
     CGRect r = [iv convertRect:iv.bounds toView:tv];
     CGFloat dx = 28.5 - r.origin.x;
-    if (dx < 0) {
-      CGRect f = iv.frame; f.origin.x += dx; iv.frame = f;
-      UILabel *tl = self.textLabel;
-      if (tl) { CGRect lf = tl.frame; lf.origin.x += dx; tl.frame = lf; }
+    if (dx < 0) { CGRect f = iv.frame; f.origin.x += dx; iv.frame = f; }
+  }
+  if (!bigImage) {
+    UILabel *tl = self.textLabel;
+    if (tl.text.length) {
+      tl.font = [tl.font fontWithSize:14.4];
+      CGFloat target = hasIcon ? 63.5 : 32.5;
+      CGRect lr = [tl convertRect:tl.bounds toView:tv];
+      CGFloat dx = target - lr.origin.x;
+      CGRect f = tl.frame; f.origin.x += dx; f.size.width -= dx; tl.frame = f;
+    }
+    UILabel *dl = self.detailTextLabel;
+    if (dl.text.length) {
+      dl.font = [dl.font fontWithSize:14.4];
+      CGRect rr = [dl convertRect:dl.bounds toView:tv];
+      CGFloat dx2 = 287.7 - CGRectGetMaxX(rr);
+      CGRect f2 = dl.frame; f2.origin.x += dx2; dl.frame = f2;
     }
   }
 }
