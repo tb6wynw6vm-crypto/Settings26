@@ -1,0 +1,27 @@
+name: Build tweak
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Theos
+        run: |
+          brew install ldid make xz
+          git clone --recursive --depth=1 https://github.com/theos/theos.git "$HOME/theos"
+          git clone --depth=1 https://github.com/theos/sdks.git /tmp/sdks
+          mv /tmp/sdks/*.sdk "$HOME/theos/sdks/"
+          echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
+
+      - name: Build package
+        run: gmake package FINALPACKAGE=1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LiquidSettings-deb
+          path: packages/*.deb
