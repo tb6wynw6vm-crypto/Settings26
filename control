@@ -1,6 +1,6 @@
 Package: com.settings26.reorder
 Name: Settings26
-Version: 1.0.3
+Version: 1.0.4
 Architecture: iphoneos-arm64
 Description: Reorder Settings rows like iOS 26
 Maintainer: me
