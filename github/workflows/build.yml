@@ -4,6 +4,9 @@ on:
   push:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: macos-latest
@@ -21,7 +24,11 @@ jobs:
       - name: Build package
         run: gmake package FINALPACKAGE=1
 
-      - uses: actions/upload-artifact@v4
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
         with:
-          name: LiquidSettings-deb
-          path: packages/*.deb
+          tag_name: build-${{ github.run_number }}
+          name: Settings26 build ${{ github.run_number }}
+          body: Built from commit ${{ github.sha }}
+          files: packages/*.deb
+          make_latest: true
