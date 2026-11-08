@@ -2,6 +2,9 @@ name: Build
 on:
   workflow_dispatch:
   push:
+    branches: [main]
+permissions:
+  contents: write
 jobs:
   build:
     runs-on: macos-15
@@ -24,3 +27,9 @@ jobs:
         with:
           name: Settings26-deb
           path: packages/*.deb
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Build ${{ github.run_number }}
+          files: packages/*.deb
