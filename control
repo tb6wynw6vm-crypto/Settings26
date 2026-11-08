@@ -1,9 +1,0 @@
-Package: com.settings26.reorder
-Name: Settings26
-Version: 1.0.6
-Architecture: iphoneos-arm64
-Description: Reorder Settings rows like iOS 26
-Maintainer: me
-Author: me
-Section: Tweaks
-Depends: mobilesubstrate
