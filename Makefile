@@ -7,6 +7,6 @@ include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME = LiquidSettings
 LiquidSettings_FILES = Tweak.x
-LiquidSettings_CFLAGS = -fobjc-arc
+LiquidSettings_CFLAGS = -fobjc-arc -Wno-deprecated-declarations
 
 include $(THEOS_MAKE_PATH)/tweak.mk
