@@ -1,0 +1,2956 @@
+// Settings26 v1.3 — iPadOS 26 look for Settings on iPadOS 16 (rootless)
+// Sidebar: PSSplitViewController > UINavigationController > PSUIPrefsListController > UITableView
+#import <UIKit/UIKit.h>
+#import <objc/runtime.h>
+#import <objc/message.h>
+
+@interface PSSplitViewController : UISplitViewController
+@end
+@interface PSSpecifier : NSObject
+@property (nonatomic, retain) NSString *name;
+@property (nonatomic, retain) NSString *identifier;
+@property (nonatomic, assign) id target;
+@property (nonatomic, assign) Class detailControllerClass;
+@property (nonatomic, assign) NSInteger cellType;
+@property (nonatomic, assign) SEL controllerLoadAction;
+@property (nonatomic, retain) NSMutableDictionary *properties;
++ (instancetype)preferenceSpecifierNamed:(NSString *)name target:(id)target set:(SEL)set get:(SEL)get
+                                  detail:(Class)detail cell:(NSInteger)cell edit:(Class)edit;
++ (instancetype)groupSpecifierWithName:(NSString *)name;
+- (void)setButtonAction:(SEL)action;
+- (id)propertyForKey:(NSString *)key;
+- (void)setProperty:(id)value forKey:(NSString *)key;
+@end
+@interface PSListController : UIViewController
+@property (nonatomic, retain) PSSpecifier *specifier;
+- (NSMutableArray *)specifiers;
+- (void)setSpecifiers:(NSArray *)specifiers;
+- (void)reloadSpecifiers;
+@end
+@interface PSUIPrefsListController : PSListController
+@end
+
+#pragma mark - Measurements (taken from the iPadOS 26 reference)
+
+static const CGFloat kSectionRadius   = 26.0;  // detail sections + header card
+static const CGFloat kPanelRadius     = 34.0;  // floating sidebar
+static const CGFloat kPanelSide       = 12.0;
+static const CGFloat kPanelTop        = 10.0;
+static const CGFloat kPanelClipTop    = 22.0;  // hides the empty title row above the search field
+static const CGFloat kPanelBottom     = 12.0;
+static const CGFloat kSearchHeight    = 42.0;
+static char kSidebarSCKey;
+static const CGFloat kHeaderIcon      = 58.0;
+static const CGFloat kHeaderPad       = 20.0;
+
+static const NSInteger kPanelTag      = 0x2601;
+static const NSInteger kCapsuleTag    = 0x2602;
+static char kSearchStyledKey;
+static char kHeaderKey;
+static char kHeaderPendingKey;
+static char kHeaderMergeKey;
+static char kSidebarBarKey;
+static const NSInteger kFadeTag = 0x2607;
+static const NSInteger kHeaderWrapTag = 0x2603;
+
+#pragma mark - Colors
+
+static UIColor *LGDyn(UIColor *dark, UIColor *light) {
+    return [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *t) {
+        return t.userInterfaceStyle == UIUserInterfaceStyleDark ? dark : light;
+    }];
+}
+static UIColor *LGPanelColor(void) {
+    return LGDyn([UIColor colorWithRed:20/255.0 green:20/255.0 blue:22/255.0 alpha:1],
+                 [UIColor colorWithRed:242/255.0 green:242/255.0 blue:247/255.0 alpha:1]);
+}
+static UIColor *LGCapsuleColor(void) {
+    return LGDyn([UIColor colorWithWhite:1 alpha:0.10], [UIColor colorWithWhite:0 alpha:0.07]);
+}
+static UIColor *LGBorderColor(void) {
+    return LGDyn([UIColor colorWithWhite:1 alpha:0.08], [UIColor colorWithWhite:0 alpha:0.06]);
+}
+
+#pragma mark - Helpers
+
+static UIViewController *LGOwnerVC(UIView *v) {
+    UIResponder *r = v;
+    while (r && ![r isKindOfClass:[UIViewController class]]) r = r.nextResponder;
+    return (UIViewController *)r;
+}
+static UITableView *LGTableViewFor(UIView *v) {
+    UIView *s = v.superview;
+    while (s && ![s isKindOfClass:[UITableView class]]) s = s.superview;
+    return (UITableView *)s;
+}
+static id LGFind(UIView *root, Class cls) {
+    if ([root isKindOfClass:cls]) return root;
+    for (UIView *sub in root.subviews) {
+        id f = LGFind(sub, cls);
+        if (f) return f;
+    }
+    return nil;
+}
+static BOOL LGIsSidebarTable(UITableView *tv) {
+    static Class sidebarClass;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ sidebarClass = NSClassFromString(@"PSUIPrefsListController"); });
+    if (!tv || !sidebarClass) return NO;
+    return [LGOwnerVC(tv) isKindOfClass:sidebarClass];
+}
+
+static UIImage *LGCapsuleImage(CGFloat h, UIColor *fill) {
+    UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(h + 2, h)];
+    UIImage *img = [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+        [fill setFill];
+        [[UIBezierPath bezierPathWithRoundedRect:CGRectMake(0, 0, h + 2, h) cornerRadius:h / 2.0] fill];
+    }];
+    return [img resizableImageWithCapInsets:UIEdgeInsetsMake(h / 2.0, h / 2.0, h / 2.0, h / 2.0)];
+}
+
+// Circular glass back button
+static UIImage *LGBackImage(void) {
+    static UIImage *img;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        CGFloat d = 44.0;
+        UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(d, d)];
+        img = [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+            UIBezierPath *c = [UIBezierPath bezierPathWithOvalInRect:CGRectMake(0.5, 0.5, d - 1, d - 1)];
+            [[UIColor colorWithRed:38/255.0 green:38/255.0 blue:40/255.0 alpha:1] setFill];
+            [c fill];
+            [[UIColor colorWithWhite:1 alpha:0.12] setStroke];
+            c.lineWidth = 0.75;
+            [c stroke];
+            UIImageSymbolConfiguration *cfg =
+                [UIImageSymbolConfiguration configurationWithPointSize:18 weight:UIImageSymbolWeightSemibold];
+            UIImage *chev = [[UIImage systemImageNamed:@"chevron.left" withConfiguration:cfg]
+                imageWithTintColor:UIColor.whiteColor renderingMode:UIImageRenderingModeAlwaysOriginal];
+            CGSize s = chev.size;
+            [chev drawInRect:CGRectMake((d - s.width) / 2.0 - 1.0, (d - s.height) / 2.0, s.width, s.height)];
+        }];
+        img = [img imageWithRenderingMode:UIImageRenderingModeAlwaysOriginal];
+    });
+    return img;
+}
+
+#pragma mark - Back button
+
+@interface LGPopDelegate : NSObject <UIGestureRecognizerDelegate>
+@property (nonatomic, weak) UINavigationController *nav;
+@end
+@implementation LGPopDelegate
+- (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)g {
+    return self.nav.viewControllers.count > 1 && self.nav.transitionCoordinator == nil;
+}
+@end
+
+static char kPopDelegateKey;
+static const NSInteger kBackItemTag = 0x2605;
+
+static void LGInstallBackButton(UIViewController *vc) {
+    UINavigationController *nav = vc.navigationController;
+    if (!nav || nav.viewControllers.firstObject == vc) return;
+    if (vc.navigationItem.leftBarButtonItem.tag == kBackItemTag) return;
+    if (vc.navigationItem.leftBarButtonItem) return; // pane has its own left button, leave it
+
+    __weak UINavigationController *wnav = nav;
+    UIButton *b = [UIButton buttonWithType:UIButtonTypeCustom
+                             primaryAction:[UIAction actionWithHandler:^(UIAction *a) {
+        [wnav popViewControllerAnimated:YES];
+    }]];
+    [b setImage:LGBackImage() forState:UIControlStateNormal];
+    b.frame = CGRectMake(0, 0, 44, 44);
+    [b.widthAnchor constraintEqualToConstant:44].active = YES;
+    [b.heightAnchor constraintEqualToConstant:44].active = YES;
+    b.accessibilityLabel = @"Back";
+
+    UIBarButtonItem *item = [[UIBarButtonItem alloc] initWithCustomView:b];
+    item.tag = kBackItemTag;
+    vc.navigationItem.hidesBackButton = YES;
+    vc.navigationItem.leftBarButtonItem = item;
+
+    // Keep swipe-to-go-back working with a custom left button
+    LGPopDelegate *d = objc_getAssociatedObject(nav, &kPopDelegateKey);
+    if (!d) {
+        d = [LGPopDelegate new];
+        d.nav = nav;
+        objc_setAssociatedObject(nav, &kPopDelegateKey, d, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    nav.interactivePopGestureRecognizer.delegate = d;
+    nav.interactivePopGestureRecognizer.enabled = YES;
+}
+
+#pragma mark - Sidebar search field (capsule + mic)
+
+static BOOL LGIsSidebarSearch(UIView *v) {
+    Class side = NSClassFromString(@"PSUIPrefsListController");
+    if (!side) return NO;
+    UIResponder *r = v;
+    while (r) {
+        if ([r isKindOfClass:side]) return YES;
+        if ([r isKindOfClass:[UINavigationController class]])
+            return [((UINavigationController *)r).viewControllers.firstObject isKindOfClass:side];
+        r = r.nextResponder;
+    }
+    return NO;
+}
+
+static void LGStyleSearchBar(UISearchBar *sb) {
+    if (!sb) return;
+    UISearchTextField *tf = sb.searchTextField;
+
+    if (!objc_getAssociatedObject(sb, &kSearchStyledKey)) {
+        objc_setAssociatedObject(sb, &kSearchStyledKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        [sb setSearchFieldBackgroundImage:LGCapsuleImage(kSearchHeight, [UIColor colorWithRed:38/255.0 green:38/255.0 blue:41/255.0 alpha:0.97])
+                                 forState:UIControlStateNormal];
+        tf.backgroundColor = UIColor.clearColor;
+        tf.font = [UIFont systemFontOfSize:17];
+        [sb setPositionAdjustment:UIOffsetMake(8, 0) forSearchBarIcon:UISearchBarIconSearch];
+        sb.searchTextPositionAdjustment = UIOffsetMake(4, 0);
+
+        UIImageSymbolConfiguration *cfg =
+            [UIImageSymbolConfiguration configurationWithPointSize:18 weight:UIImageSymbolWeightRegular];
+        UIImage *mic = [[UIImage systemImageNamed:@"mic" withConfiguration:cfg]
+            imageWithTintColor:[UIColor colorWithWhite:0.92 alpha:1] renderingMode:UIImageRenderingModeAlwaysOriginal];
+        UIImageView *iv = [[UIImageView alloc] initWithImage:mic];
+        iv.contentMode = UIViewContentModeCenter;
+        iv.frame = CGRectMake(0, 0, 40, 30);
+        tf.rightView = iv;
+        tf.rightViewMode = UITextFieldViewModeUnlessEditing;
+
+        __weak UISearchBar *wsb = sb;
+        [tf addAction:[UIAction actionWithHandler:^(UIAction *a) {
+            UISearchBar *bar = wsb;
+            if (!bar || bar.searchTextField.text.length) return;
+            UIResponder *r = bar;
+            while (r && ![r isKindOfClass:[UINavigationController class]]) r = r.nextResponder;
+            UISearchController *sc = ((UINavigationController *)r).viewControllers.firstObject.navigationItem.searchController;
+            if (sc.isActive) sc.active = NO;
+        }] forControlEvents:UIControlEventEditingDidEnd];
+    }
+
+    // Capsule even if the background image is ignored
+    CGFloat r = tf.bounds.size.height / 2.0;
+    if (r > 0 && fabs(tf.layer.cornerRadius - r) > 0.5) {
+        tf.layer.cornerRadius = r;
+        tf.layer.cornerCurve = kCACornerCurveCircular;
+        tf.clipsToBounds = YES;
+    }
+}
+
+#pragma mark - Floating sidebar panel
+
+static BOOL gLGSidebarBusy;
+static void LGStyleSidebarImpl(UISplitViewController *split);
+static void LGStyleSidebar(UISplitViewController *split) {
+    if (gLGSidebarBusy) return;
+    gLGSidebarBusy = YES;
+    LGStyleSidebarImpl(split);
+    gLGSidebarBusy = NO;
+}
+static void LGStyleSidebarImpl(UISplitViewController *split) {
+    UIColor *bg = UIColor.systemBackgroundColor; // black in dark mode, like the reference
+    if (![split.view.backgroundColor isEqual:bg]) split.view.backgroundColor = bg;
+    if (split.isCollapsed || split.viewControllers.count < 2) return;
+
+    if (split.primaryBackgroundStyle != UISplitViewControllerBackgroundStyleNone)
+        split.primaryBackgroundStyle = UISplitViewControllerBackgroundStyleNone;
+
+    UIViewController *master = split.viewControllers.firstObject;
+    UIView *mv = master.view;
+    if (!mv) return;
+
+    CGFloat colW = split.primaryColumnWidth;
+    CGFloat H    = split.view.bounds.size.height;
+    CGFloat top  = split.view.safeAreaInsets.top + kPanelTop;
+
+    // Kill the grey column background around the panel
+    UIView *container = mv.superview;
+    if (![container.backgroundColor isEqual:bg]) container.backgroundColor = bg;
+    for (UIView *v in container.subviews) {
+        if (v == mv || v.bounds.size.width < 1) continue;
+        if (CGRectGetMinX(v.frame) < 1 && CGRectGetMaxX(v.frame) <= colW + 1) {
+            if ([v isKindOfClass:[UIVisualEffectView class]]) { if (!v.hidden) v.hidden = YES; }
+            else if (![v.backgroundColor isEqual:bg]) v.backgroundColor = bg;
+        }
+    }
+
+    // The nav view is taller than the visible panel; its top kPanelClipTop points are masked off
+    CGFloat panelW = colW - kPanelSide * 2.0;
+    CGFloat panelH = H - top - kPanelBottom;
+    if (panelW <= 0 || panelH <= 0) return;
+    CGRect target = CGRectMake(kPanelSide, top - kPanelClipTop, panelW, panelH + kPanelClipTop);
+    if (!CGRectEqualToRect(mv.frame, target)) mv.frame = target;
+
+    if (![mv.backgroundColor isEqual:UIColor.clearColor]) mv.backgroundColor = UIColor.clearColor;
+    if (mv.layer.cornerRadius != 0) mv.layer.cornerRadius = 0;
+    if (mv.layer.borderWidth != 0) mv.layer.borderWidth = 0;
+    if (mv.clipsToBounds) mv.clipsToBounds = NO;
+
+    CGRect visible = CGRectMake(0, kPanelClipTop, panelW, panelH);
+    UIBezierPath *path = [UIBezierPath bezierPathWithRoundedRect:visible cornerRadius:kPanelRadius];
+
+    CAShapeLayer *mask = [mv.layer.mask isKindOfClass:[CAShapeLayer class]] ? (CAShapeLayer *)mv.layer.mask : nil;
+    if (!mask) { mask = [CAShapeLayer layer]; mv.layer.mask = mask; }
+    if (!CGRectEqualToRect(mask.frame, mv.bounds)) mask.frame = mv.bounds;
+    if (!CGPathEqualToPath(mask.path, path.CGPath)) mask.path = path.CGPath;
+
+    UIView *panel = [mv viewWithTag:kPanelTag];
+    if (!panel) {
+        panel = [UIView new];
+        panel.tag = kPanelTag;
+        panel.userInteractionEnabled = NO;
+        panel.backgroundColor = LGPanelColor();
+        [mv insertSubview:panel atIndex:0];
+    } else if (mv.subviews.firstObject != panel) {
+        [mv sendSubviewToBack:panel];
+    }
+    if (!CGRectEqualToRect(panel.frame, mv.bounds)) panel.frame = mv.bounds;
+
+    // Hairline border drawn on the visible rounded rect
+    CAShapeLayer *border = nil;
+    for (CALayer *l in panel.layer.sublayers) if ([l.name isEqualToString:@"LGBorder"]) border = (CAShapeLayer *)l;
+    if (!border) {
+        border = [CAShapeLayer layer];
+        border.name = @"LGBorder";
+        border.fillColor = UIColor.clearColor.CGColor;
+        border.lineWidth = 1.0;
+        [panel.layer addSublayer:border];
+    }
+    border.strokeColor = [LGBorderColor() resolvedColorWithTraitCollection:mv.traitCollection].CGColor;
+    if (!CGPathEqualToPath(border.path, path.CGPath)) border.path = path.CGPath;
+
+    UITableView *tv0 = nil;
+    if ([master isKindOfClass:[UINavigationController class]])
+        tv0 = LGFind(((UINavigationController *)master).viewControllers.firstObject.view, [UITableView class]);
+
+    if ([master isKindOfClass:[UINavigationController class]]) {
+        UINavigationBar *bar = ((UINavigationController *)master).navigationBar;
+        // Opaque panel-colored bar: rows slide under the search field without the grey blur band
+        if (!objc_getAssociatedObject(bar, &kSidebarBarKey)) {
+            objc_setAssociatedObject(bar, &kSidebarBarKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            UINavigationBarAppearance *ap = [UINavigationBarAppearance new];
+            [ap configureWithTransparentBackground];
+            ap.shadowColor = UIColor.clearColor;
+            bar.standardAppearance = ap;
+            bar.compactAppearance = ap;
+            bar.scrollEdgeAppearance = ap;
+        }
+        // Fade: opaque above the search field, see-through behind it, clear just below it
+        UIView *fadeView = (bar.superview == mv) ? [mv viewWithTag:kFadeTag] : nil;
+        if (bar.superview == mv) {
+        if (!fadeView) {
+            fadeView = [UIView new];
+            fadeView.tag = kFadeTag;
+            fadeView.userInteractionEnabled = NO;
+            [mv insertSubview:fadeView belowSubview:bar];
+        } else if ([mv.subviews indexOfObject:fadeView] + 1 != [mv.subviews indexOfObject:bar]) {
+            [mv insertSubview:fadeView belowSubview:bar];
+        }
+        // The colour is a dynamic UIColor on the view; the gradient only shapes alpha (mask),
+        // so a light-mode snapshot taken when leaving Settings can't freeze it white.
+        if (![fadeView.backgroundColor isEqual:LGPanelColor()]) fadeView.backgroundColor = LGPanelColor();
+        CAGradientLayer *mask = (CAGradientLayer *)fadeView.layer.mask;
+        if (![mask isKindOfClass:[CAGradientLayer class]]) {
+            for (CALayer *l in [fadeView.layer.sublayers copy]) [l removeFromSuperlayer];
+            mask = [CAGradientLayer layer];
+            fadeView.layer.mask = mask;
+        }
+        CGFloat barBottom = CGRectGetMaxY(bar.frame);
+        CGFloat fadeH = barBottom + 18.0;
+        CGRect ff = CGRectMake(0, 0, mv.bounds.size.width, fadeH);
+        if (fadeH > 20 && (!CGRectEqualToRect(fadeView.frame, ff) || !mask.colors)) {
+            fadeView.frame = ff;
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            mask.frame = fadeView.bounds;
+            CGFloat searchTop = MAX(0, barBottom - kSearchHeight - 8.0);
+            mask.colors = @[(id)UIColor.blackColor.CGColor, (id)UIColor.blackColor.CGColor,
+                            (id)[UIColor colorWithWhite:0 alpha:0.78].CGColor,
+                            (id)UIColor.clearColor.CGColor];
+            mask.locations = @[@0.0, @(searchTop / fadeH), @(barBottom / fadeH), @1.0];
+            [CATransaction commit];
+        }
+        }
+
+        UIViewController *sideRoot = ((UINavigationController *)master).viewControllers.firstObject;
+        UISearchController *sc = sideRoot.navigationItem.searchController;
+        if (sc && !objc_getAssociatedObject(sc, &kSidebarSCKey))
+            objc_setAssociatedObject(sc, &kSidebarSCKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        if (tv0 && tv0.showsVerticalScrollIndicator) tv0.showsVerticalScrollIndicator = NO;
+        if (sideRoot.navigationItem.hidesSearchBarWhenScrolling)
+            sideRoot.navigationItem.hidesSearchBarWhenScrolling = NO;
+    }
+
+    if ([master isKindOfClass:[UINavigationController class]]) {
+        UIViewController *rootVC = ((UINavigationController *)master).topViewController;
+        if (![rootVC.view.backgroundColor isEqual:UIColor.clearColor])
+            rootVC.view.backgroundColor = UIColor.clearColor;
+        UITableView *tv = LGFind(rootVC.view, [UITableView class]);
+        if (tv) {
+            if (![tv.backgroundColor isEqual:UIColor.clearColor]) tv.backgroundColor = UIColor.clearColor;
+            if (tv.backgroundView) tv.backgroundView = nil;
+            if (tv.separatorStyle != UITableViewCellSeparatorStyleNone)
+                tv.separatorStyle = UITableViewCellSeparatorStyleNone;
+        }
+    }
+}
+
+#pragma mark - Sidebar rows (flat, grey capsule when selected, blue text)
+
+static void LGGlossIcon(UIImageView *iv);
+static void LGGlossIconMax(UIImageView *iv, CGFloat maxSide);
+static NSMutableDictionary<NSString *, UIImage *> *gLGIconCache;
+static NSString *LGNormalizeTitle(NSString *s) {
+    s = [s stringByReplacingOccurrencesOfString:@"\u2011" withString:@"-"];
+    return [s stringByReplacingOccurrencesOfString:@"\u2010" withString:@"-"];
+}
+#pragma mark - Real iPadOS 26 icons (cropped from the reference screenshots, packed in icons.png)
+
+static NSDictionary<NSString *, NSArray<NSNumber *> *> *LGAtlasMap(void) {
+    static NSDictionary *m;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ m = @{
+    @"about": @[@0, @0, @58],
+    @"accessibility": @[@58, @0, @58],
+    @"accessories": @[@116, @0, @58],
+    @"airdrop": @[@174, @0, @58],
+    @"airplane_mode": @[@232, @0, @58],
+    @"airplay_continuity": @[@290, @0, @58],
+    @"analytics_improvements": @[@348, @0, @58],
+    @"app_clips": @[@406, @0, @58],
+    @"app_privacy_report": @[@464, @0, @58],
+    @"apple_advertising": @[@522, @0, @58],
+    @"apple_pencil": @[@0, @58, @58],
+    @"applecare_warranty": @[@58, @58, @58],
+    @"apps": @[@116, @58, @58],
+    @"audio_descriptions": @[@174, @58, @58],
+    @"autofill_passwords": @[@232, @58, @58],
+    @"background_app_refresh": @[@290, @58, @58],
+    @"background_security_improvements": @[@348, @58, @58],
+    @"battery": @[@406, @58, @58],
+    @"blocked_contacts": @[@464, @58, @58],
+    @"bluetooth": @[@522, @58, @58],
+    @"calendars": @[@0, @116, @58],
+    @"camera": @[@58, @116, @58],
+    @"contacts": @[@116, @116, @58],
+    @"control_center": @[@174, @116, @58],
+    @"critical_messages": @[@232, @116, @58],
+    @"date_time": @[@290, @116, @58],
+    @"default_apps": @[@348, @116, @58],
+    @"dictionary": @[@406, @116, @58],
+    @"display_brightness": @[@464, @116, @58],
+    @"display_text_size": @[@522, @116, @58],
+    @"files_folders": @[@0, @174, @58],
+    @"focus": @[@58, @174, @58],
+    @"fonts": @[@116, @174, @58],
+    @"game_center": @[@174, @174, @58],
+    @"game_controller": @[@232, @174, @58],
+    @"general": @[@290, @174, @58],
+    @"hdr_accessibility": @[@0, @464, @116],
+    @"hdr_applecare_warranty": @[@116, @464, @116],
+    @"hdr_bluetooth": @[@232, @464, @116],
+    @"hdr_default_apps": @[@348, @464, @116],
+    @"hdr_general": @[@464, @464, @116],
+    @"hdr_privacy_security": @[@0, @580, @116],
+    @"hdr_siri": @[@116, @580, @116],
+    @"hdr_wi_fi": @[@232, @580, @116],
+    @"health_data": @[@348, @174, @58],
+    @"hidden_apps": @[@406, @174, @58],
+    @"home_screen_app_library": @[@464, @174, @58],
+    @"hover_text": @[@522, @174, @58],
+    @"icloud": @[@0, @232, @58],
+    @"ipad_storage": @[@58, @232, @58],
+    @"journaling_suggestions": @[@116, @232, @58],
+    @"keyboard": @[@174, @232, @58],
+    @"language_region": @[@232, @232, @58],
+    @"legal_regulatory": @[@290, @232, @58],
+    @"local_network": @[@348, @232, @58],
+    @"location_services": @[@406, @232, @58],
+    @"lockdown_mode": @[@464, @232, @58],
+    @"microphone": @[@522, @232, @58],
+    @"motion": @[@0, @290, @58],
+    @"motion_fitness": @[@58, @290, @58],
+    @"multitasking_gestures": @[@116, @290, @58],
+    @"notifications": @[@174, @290, @58],
+    @"paired_devices": @[@232, @290, @58],
+    @"privacy_security": @[@290, @290, @58],
+    @"read_speak": @[@348, @290, @58],
+    @"screen_capture": @[@406, @290, @58],
+    @"screen_time": @[@464, @290, @58],
+    @"search": @[@522, @290, @58],
+    @"siri": @[@0, @348, @58],
+    @"software_update": @[@58, @348, @58],
+    @"sounds": @[@116, @348, @58],
+    @"speech_recognition": @[@174, @348, @58],
+    @"touch_id_passcode": @[@232, @348, @58],
+    @"tracking": @[@290, @348, @58],
+    @"transfer_or_reset_ipad": @[@348, @348, @58],
+    @"tv_provider": @[@406, @348, @58],
+    @"voiceover": @[@464, @348, @58],
+    @"vpn_device_management": @[@522, @348, @58],
+    @"wallet_apple_pay": @[@0, @406, @58],
+    @"wallpaper": @[@58, @406, @58],
+    @"wi_fi": @[@116, @406, @58],
+    @"wired_accessories": @[@174, @406, @58],
+    @"zoom": @[@232, @406, @58],
+    }; });
+    return m;
+}
+
+static UIImage *LGAtlas(void) {
+    static UIImage *img;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        for (NSString *p in @[@"/var/jb/Library/Application Support/Settings26/icons.png",
+                              @"/Library/Application Support/Settings26/icons.png"]) {
+            img = [UIImage imageWithContentsOfFile:p];
+            if (img) break;
+        }
+    });
+    return img;
+}
+
+static NSString *LGSlug(NSString *t) {
+    NSMutableString *o = [NSMutableString new];
+    BOOL sep = NO;
+    for (NSUInteger i = 0; i < t.length; i++) {
+        unichar c = [t.lowercaseString characterAtIndex:i];
+        if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) {
+            if (sep && o.length) [o appendString:@"_"];
+            [o appendFormat:@"%C", c];
+            sep = NO;
+        } else sep = YES;
+    }
+    return o;
+}
+
+// iPadOS 16 names -> the iPadOS 26 icon that replaced them
+static NSDictionary<NSString *, NSString *> *LGIconAliases(void) {
+    return @{ @"Siri & Search": @"Siri",
+              @"Home Screen & Multitasking": @"Home Screen & App Library",
+              @"Home Screen & Dock": @"Home Screen & App Library",
+              @"AirPlay & Handoff": @"AirPlay & Continuity",
+              @"Files and Folders": @"Files & Folders",
+              @"Health": @"Health Data" };
+}
+
+static UIColor *LGHex(uint32_t h);
+static void LGDrawTile(CGContextRef cg, CGFloat d, UIColor *fill);
+static UIImage *LGDrawnIcon(NSString *title, BOOL large) {
+    if (![title isEqualToString:@"Face ID & Passcode"]) return nil;
+    static NSCache *cache;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ cache = [NSCache new]; });
+    NSString *key = [title stringByAppendingString:large ? @"#L" : @"#S"];
+    UIImage *hit = [cache objectForKey:key];
+    if (hit) return hit;
+    CGFloat d = large ? 58.0 : 29.0;
+    UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:d * 0.55 weight:UIImageSymbolWeightMedium];
+    UIImage *sym = [[UIImage systemImageNamed:@"faceid" withConfiguration:cfg]
+                       imageWithTintColor:UIColor.whiteColor renderingMode:UIImageRenderingModeAlwaysOriginal];
+    UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(d, d)];
+    UIImage *img = [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+        LGDrawTile(ctx.CGContext, d, LGHex(0x34C759));
+        if (sym) {
+            CGSize ss = sym.size;
+            CGFloat k = MIN(1.0, d * 0.62 / MAX(ss.width, ss.height));
+            CGSize ds = CGSizeMake(ss.width * k, ss.height * k);
+            [sym drawInRect:CGRectMake((d - ds.width) / 2.0, (d - ds.height) / 2.0, ds.width, ds.height)];
+        }
+    }];
+    img = [img imageWithRenderingMode:UIImageRenderingModeAlwaysOriginal];
+    [cache setObject:img forKey:key];
+    return img;
+}
+
+static UIImage *LGRefIcon(NSString *title, BOOL large) {
+    UIImage *drawn = LGDrawnIcon(title, large);
+    if (drawn) return drawn;
+    if (!title.length || !LGAtlas()) return nil;
+    static NSCache *cache;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ cache = [NSCache new]; });
+    NSString *t = LGIconAliases()[title] ?: title;
+    NSString *slug = LGSlug(t);
+    NSString *key = large ? [@"hdr_" stringByAppendingString:slug] : slug;
+    UIImage *hit = [cache objectForKey:key];
+    if (hit) return hit;
+    NSArray<NSNumber *> *r = LGAtlasMap()[key];
+    if (!r) return large ? LGRefIcon(title, NO) : nil;
+    CGRect px = CGRectMake(r[0].doubleValue, r[1].doubleValue, r[2].doubleValue, r[2].doubleValue);
+    CGImageRef cg = CGImageCreateWithImageInRect(LGAtlas().CGImage, px);
+    if (!cg) return nil;
+    UIImage *img = [[UIImage imageWithCGImage:cg scale:2.0 orientation:UIImageOrientationUp]
+                       imageWithRenderingMode:UIImageRenderingModeAlwaysOriginal];
+    CGImageRelease(cg);
+    [cache setObject:img forKey:key];
+    return img;
+}
+
+static UIImage *LGAtlasPart(NSString *key) {
+    static NSDictionary *rects;
+    static NSCache *cache;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ cache = [NSCache new]; rects = @{
+    @"mt_full": @[@0, @696, @249, @186],
+    @"mt_windowed": @[@249, @696, @248, @186],
+    @"mt_stage": @[@497, @696, @249, @186],
+    }; });
+    UIImage *hit = [cache objectForKey:key];
+    if (hit || !LGAtlas()) return hit;
+    NSArray<NSNumber *> *r = rects[key];
+    if (!r) return nil;
+    CGImageRef cg = CGImageCreateWithImageInRect(LGAtlas().CGImage,
+        CGRectMake(r[0].doubleValue, r[1].doubleValue, r[2].doubleValue, r[3].doubleValue));
+    if (!cg) return nil;
+    UIImage *img = [UIImage imageWithCGImage:cg scale:1.32 orientation:UIImageOrientationUp]; // reference was 1.32 px/pt
+    CGImageRelease(cg);
+    [cache setObject:img forKey:key];
+    return img;
+}
+
+static char kSetIconTitleKey;
+static char kSetIconCountKey;
+static void LGHideGloss(UIImageView *iv) {
+    for (CALayer *l in iv.layer.sublayers) if ([l.name isEqualToString:@"LGGloss"] && !l.hidden) l.hidden = YES;
+}
+// Put an icon on a cell without ever fighting the cell in a loop
+static void LGSetCellIcon(UITableViewCell *cell, UIImage *img) {
+    if (!img || cell.imageView.image == img) { LGHideGloss(cell.imageView); return; }
+    NSString *t = cell.textLabel.text ?: @"";
+    if (![objc_getAssociatedObject(cell, &kSetIconTitleKey) isEqualToString:t]) {
+        objc_setAssociatedObject(cell, &kSetIconTitleKey, t, OBJC_ASSOCIATION_COPY_NONATOMIC);
+        objc_setAssociatedObject(cell, &kSetIconCountKey, @0, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    NSInteger n = [objc_getAssociatedObject(cell, &kSetIconCountKey) integerValue];
+    if (n >= 6) return;
+    objc_setAssociatedObject(cell, &kSetIconCountKey, @(n + 1), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    cell.imageView.image = img;
+    LGHideGloss(cell.imageView);
+}
+
+static char kCellBGKey;
+static char kCellBGCountKey;
+static const NSInteger kClearSelTag = 0x2604;
+
+static BOOL LGIsClearConfig(UIBackgroundConfiguration *c) {
+    return c && [c.backgroundColor isEqual:UIColor.clearColor] && c.customView == nil;
+}
+static void LGApplyClearBackground(UITableViewCell *cell) {
+    if (LGIsClearConfig(cell.backgroundConfiguration)) return;
+    UIBackgroundConfiguration *bg = [UIBackgroundConfiguration clearConfiguration];
+    bg.backgroundColor = UIColor.clearColor;
+    cell.backgroundConfiguration = bg;
+}
+// From layoutSubviews: at most 4 attempts per cell, so it can never loop
+static void LGApplyClearBackgroundLimited(UITableViewCell *cell) {
+    if (LGIsClearConfig(cell.backgroundConfiguration)) return;
+    NSInteger n = [objc_getAssociatedObject(cell, &kCellBGCountKey) integerValue];
+    if (n >= 4) return;
+    objc_setAssociatedObject(cell, &kCellBGCountKey, @(n + 1), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    LGApplyClearBackground(cell);
+}
+
+static void LGStyleSidebarCell(UITableViewCell *cell) {
+    // Every write is guarded: writing an unchanged value can still re-trigger layout.
+    if (cell.selectionStyle != UITableViewCellSelectionStyleNone)
+        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    if (![cell.backgroundColor isEqual:UIColor.clearColor]) cell.backgroundColor = UIColor.clearColor;
+    if (![cell.contentView.backgroundColor isEqual:UIColor.clearColor])
+        cell.contentView.backgroundColor = UIColor.clearColor;
+    if (cell.layer.cornerRadius != 0) cell.layer.cornerRadius = 0;
+    if (cell.selectedBackgroundView.tag != kClearSelTag) {
+        UIView *clear = [UIView new];
+        clear.tag = kClearSelTag;
+        clear.backgroundColor = UIColor.clearColor;
+        cell.selectedBackgroundView = clear;
+    }
+    LGApplyClearBackgroundLimited(cell);
+
+    // Ask UIKit once to run updateConfigurationUsingState, where the clear background is applied
+    if (!objc_getAssociatedObject(cell, &kCellBGKey)) {
+        objc_setAssociatedObject(cell, &kCellBGKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        [cell setNeedsUpdateConfiguration];
+    }
+
+    BOOL on = cell.isSelected || cell.isHighlighted;
+
+    UIView *cap = [cell viewWithTag:kCapsuleTag];
+    if (!cap) {
+        cap = [UIView new];
+        cap.tag = kCapsuleTag;
+        cap.userInteractionEnabled = NO;
+        cap.backgroundColor = LGCapsuleColor();
+        [cell insertSubview:cap atIndex:0];
+    } else if (cell.subviews.firstObject != cap) {
+        [cell sendSubviewToBack:cap];
+    }
+    CGRect f = CGRectInset(cell.bounds, 0, 2);
+    if (!CGRectEqualToRect(cap.frame, f)) {
+        cap.frame = f;
+        cap.layer.cornerRadius = f.size.height / 2.0;
+    }
+    if (cap.hidden == on) cap.hidden = !on;
+
+    if (cell.bounds.size.height > 60) { // the account row
+        NSMutableArray<UIView *> *st = [NSMutableArray arrayWithObject:cell.contentView];
+        while (st.count) {
+            UIView *v = st.lastObject; [st removeLastObject];
+            [st addObjectsFromArray:v.subviews];
+            if ([v isKindOfClass:[UILabel class]]) {
+                UILabel *l = (UILabel *)v;
+                if ([l.text hasPrefix:@"Apple ID, iCloud"]) l.text = @"Apple Account, iCloud, and more";
+            }
+        }
+    }
+    if (!cell.imageView.image && cell.bounds.size.height <= 60 && cell.textLabel.text.length) {
+        // notice rows (e.g. "iPadOS 27.2 Now Available") have no chevron in iPadOS 26
+        if (cell.accessoryType != UITableViewCellAccessoryNone) cell.accessoryType = UITableViewCellAccessoryNone;
+        NSMutableArray<UIView *> *st = [NSMutableArray arrayWithObject:cell];
+        while (st.count) {
+            UIView *v = st.lastObject; [st removeLastObject];
+            if (v == cell.contentView) continue;
+            [st addObjectsFromArray:v.subviews];
+            if ([v isKindOfClass:[UIImageView class]] && v != cell.imageView &&
+                [((UIImageView *)v).image.description rangeOfString:@"chevron"].location != NSNotFound && !v.hidden)
+                v.hidden = YES;
+        }
+    }
+    UIImage *ref = cell.imageView.image ? LGRefIcon(LGNormalizeTitle(cell.textLabel.text ?: @""), NO) : nil;
+    if (ref) LGSetCellIcon(cell, ref);
+    else LGGlossIcon(cell.imageView);
+    if (cell.textLabel.text.length && cell.imageView.image) {
+        if (!gLGIconCache) gLGIconCache = [NSMutableDictionary new];
+        gLGIconCache[LGNormalizeTitle(cell.textLabel.text)] = cell.imageView.image;
+    }
+    if (cell.textLabel.text.length) {
+        UIColor *want = on ? UIColor.systemBlueColor : UIColor.labelColor;
+        if (![cell.textLabel.textColor isEqual:want]) cell.textLabel.textColor = want;
+    }
+}
+
+
+#pragma mark - Header card (icon + title + description) for top-level panes
+
+static NSDictionary<NSString *, NSString *> *LGHeaderTexts(void) {
+    static NSDictionary *d;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        d = @{
+            @"General": @"Manage your overall setup and preferences for iPad, such as software updates, device language, AirDrop, and more.",
+            @"Wi-Fi": @"Connect to Wi-Fi, view available networks, and manage settings for joining networks and nearby hotspots.",
+            @"Bluetooth": @"Connect to accessories you can use for activities such as streaming music, making phone calls, and gaming.",
+            @"Accessibility": @"Personalize iPad in ways that work best for you with accessibility features for vision, mobility, hearing, speech, and cognition.",
+            @"Privacy & Security": @"Control which apps can access your data, location, camera, and microphone, and manage safety protections.",
+            @"Siri": @"Siri is an intelligent assistant that helps you find information and get things done.",
+            @"Face ID & Passcode": @"Use Face ID and a passcode to unlock iPad, sign in to apps, approve purchases, and protect your personal data.",
+            @"AppleCare & Warranty": @"View coverage status for all your devices, and purchase coverage for eligible devices.",
+            @"Default Apps": @"Manage your default apps for iPad, including choosing the apps you prefer to use for opening links on the web, sending emails, making contactless payments, and more.",
+        };
+    });
+    return d;
+}
+
+static NSString *LGNormalize(NSString *s) { return LGNormalizeTitle(s); }
+
+static BOOL gLGHeaderBusy;
+static void LGApplyHeaderImpl(UIViewController *vc);
+static void LGApplyHeader(UIViewController *vc) {
+    if (gLGHeaderBusy) return;
+    gLGHeaderBusy = YES;
+    LGApplyHeaderImpl(vc);
+    gLGHeaderBusy = NO;
+}
+static char kHeaderRetryKey;
+
+static void LGApplyHeaderImpl(UIViewController *vc) {
+    UINavigationController *nav = vc.navigationController;
+    UISplitViewController *split = nav.splitViewController;
+    if (!split || split.isCollapsed || split.viewControllers.count < 2) return;
+    if (nav != split.viewControllers.lastObject) return;
+
+    // Some panes (Wi-Fi) are a child inside a container: use the container for position and title
+    UIViewController *top = vc;
+    while (top.parentViewController && top.parentViewController != nav) top = top.parentViewController;
+    NSString *title = LGNormalize(vc.title ?: top.title ?: top.navigationItem.title ?: @"");
+    // Top-level panes get the card; of the pushed ones only those the reference shows with one
+    BOOL pushedOK = [title isEqualToString:@"Default Apps"] || [title isEqualToString:@"AppleCare & Warranty"];
+    if (nav.viewControllers.firstObject != top && !pushedOK) {
+        UITableView *t0 = LGFind(vc.view, [UITableView class]);
+        UIView *h0 = objc_getAssociatedObject(t0, &kHeaderKey);
+        if (h0 && t0.tableHeaderView == h0) t0.tableHeaderView = nil;
+        return;
+    }
+    NSString *desc = LGHeaderTexts()[title];
+    UITableView *tv = LGFind(vc.view, [UITableView class]);
+    if (!tv || tv.bounds.size.width < 100) return;
+    UIView *mineHdr = objc_getAssociatedObject(tv, &kHeaderKey);
+    if (!desc) { // Settings reuses controllers: never leave another page's card behind
+        if (mineHdr && tv.tableHeaderView == mineHdr) tv.tableHeaderView = nil;
+        return;
+    }
+    if (tv.isEditing) { // edit lists (Known Networks) have no card
+        if (mineHdr && tv.tableHeaderView == mineHdr) tv.tableHeaderView = nil;
+        return;
+    }
+    // Leave a pane's own header alone, unless the slot was ours before (Edit -> Cancel resets it)
+    BOOL replaceOwn = [title isEqualToString:@"Face ID & Passcode"];
+    if (!mineHdr && !replaceOwn && tv.tableHeaderView && tv.tableHeaderView.bounds.size.height > 1) return;
+
+    // Icon: selected sidebar row, else the cache filled while styling sidebar rows
+    UIImage *icon = nil;
+    UITableView *side = LGFind(split.viewControllers.firstObject.view, [UITableView class]);
+    NSIndexPath *selIP = side.indexPathForSelectedRow;
+    if (selIP) icon = [side cellForRowAtIndexPath:selIP].imageView.image;
+    UIImage *refHdr = LGRefIcon(title, YES);
+    if (refHdr) icon = refHdr;
+    if (!icon) icon = gLGIconCache[title];
+    if (!icon) {
+        NSInteger n = [objc_getAssociatedObject(vc, &kHeaderRetryKey) integerValue];
+        if (n < 8) {
+            objc_setAssociatedObject(vc, &kHeaderRetryKey, @(n + 1), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            __weak UIViewController *wvc = vc;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{ if (wvc) LGApplyHeader(wvc); });
+        }
+    }
+
+    UIView *wrap = mineHdr;
+    UIView *card; UIImageView *iv; UILabel *tl; UILabel *dl;
+    if (!wrap) {
+        wrap = [UIView new];
+        wrap.tag = kHeaderWrapTag;
+        card = [UIView new]; card.tag = 1;
+        card.backgroundColor = UIColor.secondarySystemGroupedBackgroundColor;
+        card.layer.cornerRadius = kSectionRadius;
+        card.layer.cornerCurve = kCACornerCurveContinuous;
+        [wrap addSubview:card];
+
+        iv = [UIImageView new]; iv.tag = 2;
+        iv.contentMode = UIViewContentModeScaleAspectFit;
+        iv.layer.cornerRadius = kHeaderIcon * 0.225;
+        iv.layer.cornerCurve = kCACornerCurveContinuous;
+        iv.clipsToBounds = YES;
+        [card addSubview:iv];
+
+        tl = [UILabel new]; tl.tag = 3;
+        tl.font = [UIFont systemFontOfSize:22 weight:UIFontWeightBold];
+        tl.textColor = UIColor.labelColor;
+        [card addSubview:tl];
+
+        dl = [UILabel new]; dl.tag = 4;
+        dl.font = [UIFont systemFontOfSize:17];
+        dl.textColor = UIColor.secondaryLabelColor;
+        dl.numberOfLines = 0;
+        [card addSubview:dl];
+
+        objc_setAssociatedObject(tv, &kHeaderKey, wrap, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    card = [wrap viewWithTag:1];
+    iv = [card viewWithTag:2]; tl = [card viewWithTag:3]; dl = [card viewWithTag:4];
+
+    // Horizontal placement: exactly where the first section is drawn, measured in the header's own space
+    CGRect rf = tv.readableContentGuide.layoutFrame;
+    CGFloat x = rf.origin.x, w = rf.size.width;
+    if ([tv numberOfSections] > 0 && [tv numberOfRowsInSection:0] > 0) {
+        UITableViewCell *first = [tv cellForRowAtIndexPath:[NSIndexPath indexPathForRow:0 inSection:0]];
+        if (first && first.bounds.size.width > 100) {
+            CGRect cr = (wrap.window && first.window) ? [first convertRect:first.bounds toView:wrap]
+                                                       : [first convertRect:first.bounds toView:tv];
+            x = cr.origin.x; w = cr.size.width;
+        }
+    }
+
+    if (iv.image != icon) iv.image = icon;
+    NSString *t = vc.title ?: top.title ?: top.navigationItem.title ?: title;
+    if (![tl.text isEqualToString:t]) tl.text = t;
+    static NSSet *learnMore;
+    static dispatch_once_t lmOnce;
+    dispatch_once(&lmOnce, ^{
+        learnMore = [NSSet setWithArray:@[@"Wi-Fi", @"Bluetooth", @"Accessibility", @"Siri", @"Privacy & Security",
+                                          @"Face ID & Passcode"]];
+    });
+    if (![dl.text hasPrefix:desc]) {
+        NSMutableAttributedString *as = [[NSMutableAttributedString alloc] initWithString:desc attributes:@{
+            NSFontAttributeName: dl.font, NSForegroundColorAttributeName: UIColor.secondaryLabelColor }];
+        NSString *link = [title isEqualToString:@"AppleCare & Warranty"] ? @" Learn more about coverage\u2026"
+                       : ([learnMore containsObject:title] ? @" Learn more\u2026" : nil);
+        if (link)
+            [as appendAttributedString:[[NSAttributedString alloc] initWithString:link attributes:@{
+                NSFontAttributeName: dl.font, NSForegroundColorAttributeName: UIColor.systemBlueColor }]];
+        dl.attributedText = as;
+    }
+
+    CGFloat inner = w - kHeaderPad * 2;
+    CGFloat y = kHeaderPad;
+    if (icon) {
+        iv.hidden = NO;
+        iv.frame = CGRectMake(kHeaderPad, y, kHeaderIcon, kHeaderIcon);
+        if (icon == refHdr) LGHideGloss(iv); else LGGlossIconMax(iv, 64.0);
+        y += kHeaderIcon + 14;
+    }
+    else iv.hidden = YES;
+    CGFloat th = ceil([tl sizeThatFits:CGSizeMake(inner, CGFLOAT_MAX)].height);
+    tl.frame = CGRectMake(kHeaderPad, y, inner, th); y += th + 6;
+    CGFloat dh = ceil([dl sizeThatFits:CGSizeMake(inner, CGFLOAT_MAX)].height);
+    dl.frame = CGRectMake(kHeaderPad, y, inner, dh); y += dh + kHeaderPad;
+
+    BOOL merge = [title isEqualToString:@"Wi-Fi"] || [title isEqualToString:@"Bluetooth"];
+    objc_setAssociatedObject(tv, &kHeaderMergeKey, merge ? @YES : nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    static const CGFloat kCardTop = 24.0, kCardBottomGap = 30.0;
+    CGFloat cardH = y;
+    CGFloat totalH = kCardTop + y + (merge ? 0 : kCardBottomGap);
+    CGRect wf = CGRectMake(0, 0, tv.bounds.size.width, totalH);
+    if (tv.tableHeaderView != wrap || fabs(wrap.frame.size.height - totalH) > 1.0 ||
+        fabs(wrap.frame.size.width - wf.size.width) > 1.0) {
+        wrap.frame = wf;
+        tv.tableHeaderView = wrap;
+    }
+    wrap.clipsToBounds = NO;
+
+    // Merged: the card runs down to the first row, square bottom corners, hairline between
+    if (merge && [tv numberOfSections] > 0 && [tv numberOfRowsInSection:0] > 0) {
+        // geometry from the table itself: no waiting for the cell to appear (Edit -> Cancel gap)
+        CGRect r0 = [tv rectForRowAtIndexPath:[NSIndexPath indexPathForRow:0 inSection:0]];
+        CGFloat firstTop = r0.origin.y - wrap.frame.origin.y;
+        if (firstTop - kCardTop > cardH) cardH = firstTop - kCardTop;
+    }
+    CGRect cf = CGRectMake(x, kCardTop, w, cardH);
+    if (!CGRectEqualToRect(card.frame, cf)) card.frame = cf;
+    CACornerMask cm = merge ? (kCALayerMinXMinYCorner | kCALayerMaxXMinYCorner)
+                            : (kCALayerMinXMinYCorner | kCALayerMaxXMinYCorner | kCALayerMinXMaxYCorner | kCALayerMaxXMaxYCorner);
+    if (card.layer.maskedCorners != cm) card.layer.maskedCorners = cm;
+
+    UIView *line = [card viewWithTag:5];
+    if (!line) {
+        line = [UIView new];
+        line.tag = 5;
+        line.backgroundColor = UIColor.separatorColor;
+        [card addSubview:line];
+    }
+    line.hidden = !merge;
+    CGFloat hair = 1.0 / UIScreen.mainScreen.scale;
+    CGRect lf = CGRectMake(kHeaderPad, cardH - hair, w - kHeaderPad, hair);
+    if (!CGRectEqualToRect(line.frame, lf)) line.frame = lf;
+}
+
+#pragma mark - Row icons for General / Privacy & Security (drawn in code, 26 style)
+
+static UIColor *LGHex(uint32_t h) {
+    return [UIColor colorWithRed:((h >> 16) & 0xFF) / 255.0 green:((h >> 8) & 0xFF) / 255.0
+                            blue:(h & 0xFF) / 255.0 alpha:1];
+}
+
+static NSDictionary<NSString *, NSArray *> *LGRowIconMap(void) {
+    static NSDictionary *m;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSNumber *gray = @0x8E8E93, *blue = @0x0A84FF, *green = @0x30D158, *orange = @0xFF9F0A,
+                 *red = @0xFF453A, *indigo = @0x5E5CE6, *purple = @0xBF5AF2, *black = @0x1C1C1E,
+                 *pink = @0xFF375F, *teal = @0x40C8E0;
+        m = @{
+            // General
+            @"About": @[@"ipad", gray],
+            @"Software Update": @[@"gearshape.arrow.triangle.2.circlepath", gray],
+            @"iPad Storage": @[@"internaldrive.fill", gray],
+            @"AirDrop": @[@"dot.radiowaves.left.and.right", @0xFFFFFF, blue],
+            @"AirPlay & Handoff": @[@"airplayvideo", blue],
+            @"AirPlay & Continuity": @[@"airplayvideo", blue],
+            @"Picture in Picture": @[@"pip", blue],
+            @"Screen Capture": @[@"camera.viewfinder", gray],
+            @"AutoFill & Passwords": @[@"key.fill", gray],
+            @"Background App Refresh": @[@"arrow.clockwise", gray],
+            @"Date & Time": @[@"calendar.badge.clock", blue],
+            @"Dictionary": @[@"character.book.closed.fill", blue],
+            @"Fonts": @[@"TEXT:Aa", gray],
+            @"Game Controller": @[@"gamecontroller.fill", gray],
+            @"Gestures": @[@"hand.draw.fill", gray],
+            @"Keyboard": @[@"keyboard", gray],
+            @"Language & Region": @[@"globe", blue],
+            @"TV Provider": @[@"tv", black],
+            @"VPN & Device Management": @[@"gear", gray],
+            @"AppleCare & Warranty": @[@"applelogo", @0xFFFFFF, red],
+            @"Health Data": @[@"square.stack.3d.up.fill", blue],
+            @"Legal & Regulatory": @[@"doc.text.fill", gray],
+            @"Transfer or Reset iPad": @[@"arrow.counterclockwise", gray],
+            // Privacy & Security
+            @"Location Services": @[@"location.fill", blue],
+            @"Tracking": @[@"point.topleft.down.curvedto.point.bottomright.up", orange],
+            @"Calendars": @[@"calendar", @0xFFFFFF, red],
+            @"Contacts": @[@"person.crop.circle.fill", gray],
+            @"Files and Folders": @[@"folder.fill", blue],
+            @"Files & Folders": @[@"folder.fill", blue],
+            @"Focus": @[@"moon.fill", indigo],
+            @"Health": @[@"heart.fill", @0xFFFFFF, pink],
+            @"HomeKit": @[@"house.fill", orange],
+            @"Media & Apple Music": @[@"music.note", red],
+            @"Passkeys Access for Web Browsers": @[@"person.badge.key.fill", gray],
+            @"Photos": @[@"photo.on.rectangle", orange],
+            @"Reminders": @[@"list.bullet", blue],
+            @"Accessories": @[@"dot.radiowaves.right", blue],
+            @"Bluetooth": @[@"bolt.horizontal.fill", blue],
+            @"Camera": @[@"camera.fill", gray],
+            @"Critical Messages": @[@"exclamationmark.bubble.fill", green],
+            @"Local Network": @[@"network", blue],
+            @"Microphone": @[@"mic.fill", orange],
+            @"Motion & Fitness": @[@"figure.run", green],
+            @"Paired Devices": @[@"ipad.and.iphone", blue],
+            @"Research Sensor & Usage Data": @[@"waveform.path.ecg", blue],
+            @"Speech Recognition": @[@"waveform", gray],
+            @"Journaling Suggestions": @[@"wand.and.stars", purple],
+            @"Safety Check": @[@"person.2.fill", blue],
+            @"Blocked Contacts": @[@"nosign", red],
+            @"Sensitive Content Warning": @[@"eye.fill", blue],
+            @"Analytics & Improvements": @[@"chart.bar.fill", blue],
+            @"Apple Advertising": @[@"megaphone.fill", blue],
+            @"App Privacy Report": @[@"checkmark.shield.fill", green],
+            @"Wired Accessories": @[@"cable.connector", gray],
+            @"Background Security Improvements": @[@"shield.fill", blue],
+            @"Lockdown Mode": @[@"hand.raised.fill", blue],
+            @"Developer Mode": @[@"hammer.fill", teal],
+        };
+    });
+    return m;
+}
+
+static UIColor *LGShade(UIColor *c, CGFloat amt) { // amt > 0 lighter, < 0 darker
+    CGFloat r, g, b, al;
+    if (![c getRed:&r green:&g blue:&b alpha:&al]) return c;
+    if (amt >= 0) { r += (1 - r) * amt; g += (1 - g) * amt; b += (1 - b) * amt; }
+    else { r *= 1 + amt; g *= 1 + amt; b *= 1 + amt; }
+    return [UIColor colorWithRed:r green:g blue:b alpha:al];
+}
+
+static const CGFloat kTileRadiusK = 0.2237; // iOS app-icon squircle ratio
+
+static void LGDrawTile(CGContextRef cg, CGFloat d, UIColor *fill) {
+    UIBezierPath *tile = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(0, 0, d, d) cornerRadius:d * kTileRadiusK];
+    CGContextSaveGState(cg);
+    [tile addClip];
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+    BOOL white = [fill isEqual:LGHex(0xFFFFFF)];
+    NSArray *cols = @[(id)(white ? LGHex(0xFFFFFF) : LGShade(fill, 0.14)).CGColor,
+                      (id)(white ? LGHex(0xE9E9EE) : LGShade(fill, -0.08)).CGColor];
+    CGGradientRef gr = CGGradientCreateWithColors(cs, (__bridge CFArrayRef)cols, NULL);
+    CGContextDrawLinearGradient(cg, gr, CGPointMake(0, 0), CGPointMake(0, d), 0);
+    CGGradientRelease(gr);
+    CGColorSpaceRelease(cs);
+    CGContextRestoreGState(cg);
+
+    UIBezierPath *edge = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(0.25, 0.25, d - 0.5, d - 0.5)
+                                                    cornerRadius:d * kTileRadiusK - 0.25];
+    edge.lineWidth = 0.5;
+    [[UIColor colorWithWhite:1 alpha:white ? 0.0 : 0.22] setStroke];
+    [edge stroke];
+}
+
+static UIImage *LGRowIcon(NSString *title) {
+    static NSCache *cache;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ cache = [NSCache new]; });
+    UIImage *img = [cache objectForKey:title];
+    if (img) return img;
+
+    NSArray *spec = LGRowIconMap()[title];
+    if (!spec) return nil;
+    NSString *name = spec[0];
+    UIColor *fill = LGHex([spec[1] unsignedIntValue]);
+    UIColor *glyph = spec.count > 2 ? LGHex([spec[2] unsignedIntValue]) : UIColor.whiteColor;
+
+    UIImage *sym = nil;
+    NSString *text = nil;
+    if ([name hasPrefix:@"TEXT:"]) {
+        text = [name substringFromIndex:5];
+    } else {
+        UIImageSymbolConfiguration *cfg =
+            [UIImageSymbolConfiguration configurationWithPointSize:15 weight:UIImageSymbolWeightMedium];
+        sym = [UIImage systemImageNamed:name withConfiguration:cfg];
+        if (!sym) return nil;
+        sym = [sym imageWithTintColor:glyph renderingMode:UIImageRenderingModeAlwaysOriginal];
+    }
+
+    CGFloat d = 29.0;
+    UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(d, d)];
+    img = [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+        LGDrawTile(ctx.CGContext, d, fill);
+        if (sym) {
+            CGSize ss = sym.size;
+            CGFloat k = MIN(1.0, 18.0 / MAX(ss.width, ss.height));
+            CGSize ds = CGSizeMake(ss.width * k, ss.height * k);
+            [sym drawInRect:CGRectMake((d - ds.width) / 2.0, (d - ds.height) / 2.0, ds.width, ds.height)];
+        } else {
+            NSDictionary *at = @{ NSFontAttributeName: [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold],
+                                  NSForegroundColorAttributeName: glyph };
+            CGSize ts = [text sizeWithAttributes:at];
+            [text drawAtPoint:CGPointMake((d - ts.width) / 2.0, (d - ts.height) / 2.0) withAttributes:at];
+        }
+    }];
+    img = [img imageWithRenderingMode:UIImageRenderingModeAlwaysOriginal];
+    [cache setObject:img forKey:title];
+    return img;
+}
+
+// 26 gloss on icons the system already draws (sidebar + other panes): top sheen + light edge
+static void LGGlossIcon(UIImageView *iv) { LGGlossIconMax(iv, 40.0); }
+static void LGGlossIconMax(UIImageView *iv, CGFloat maxSide) {
+    CGSize sz = iv.bounds.size;
+    CALayer *gloss = nil;
+    for (CALayer *l in iv.layer.sublayers) if ([l.name isEqualToString:@"LGGloss"]) gloss = l;
+    BOOL eligible = iv.image && sz.width >= 20 && sz.width <= maxSide && fabs(sz.width - sz.height) < 2;
+    if (!eligible) { if (gloss && !gloss.hidden) gloss.hidden = YES; return; }
+
+    if (!gloss) {
+        CAGradientLayer *g = [CAGradientLayer layer];
+        g.name = @"LGGloss";
+        g.colors = @[(id)[UIColor colorWithWhite:1 alpha:0.20].CGColor,
+                     (id)[UIColor colorWithWhite:1 alpha:0.0].CGColor,
+                     (id)[UIColor colorWithWhite:0 alpha:0.06].CGColor];
+        g.locations = @[@0.0, @0.55, @1.0];
+        g.borderColor = [UIColor colorWithWhite:1 alpha:0.18].CGColor;
+        g.borderWidth = 0.5;
+        g.cornerCurve = kCACornerCurveContinuous;
+        g.masksToBounds = YES;
+        [iv.layer addSublayer:g];
+        gloss = g;
+    }
+    if (gloss.hidden) gloss.hidden = NO;
+    CGRect f = iv.bounds;
+    if (!CGRectEqualToRect(gloss.frame, f)) {
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        gloss.frame = f;
+        gloss.cornerRadius = f.size.width * kTileRadiusK;
+        [CATransaction commit];
+    }
+}
+
+static char kRowIconKey;
+
+static void LGApplyRowIcon(UITableViewCell *cell, UITableView *tv) {
+    NSString *t = cell.textLabel.text;
+    if (!t.length) return;
+    NSString *key = LGNormalizeTitle(t);
+    NSString *owner = LGNormalizeTitle(LGOwnerVC(tv).title ?: @"");
+    BOOL iconPage = [owner isEqualToString:@"General"] || [owner isEqualToString:@"Privacy & Security"];
+
+    UIImage *mine = objc_getAssociatedObject(cell, &kRowIconKey);
+    BOOL systemIcon = cell.imageView.image && cell.imageView.image != mine;
+
+    UIImage *ref = LGRefIcon(key, NO);
+    if (ref && (systemIcon || iconPage || cell.imageView.image == ref)) {
+        objc_setAssociatedObject(cell, &kRowIconKey, ref, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        LGSetCellIcon(cell, ref);
+        return;
+    }
+    if (systemIcon) { LGGlossIcon(cell.imageView); return; }
+    if (!iconPage) return;
+
+    UIImage *want = LGRowIcon(key); // drawn fallback for rows the reference doesn't show
+    if (!want || cell.imageView.image == want) return;
+    objc_setAssociatedObject(cell, &kRowIconKey, want, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    LGSetCellIcon(cell, want);
+}
+
+#pragma mark - iPadOS 26 switch (63x28 track, white capsule knob)
+
+static const NSInteger kSwitchOverlayTag = 0x2606;
+static const CGFloat kSwW = 63.0, kSwH = 28.0, kKnobW = 39.0, kKnobH = 24.0, kKnobInset = 2.0;
+static char kSwitchTargetKey;
+
+static void LGStyleSwitch(UISwitch *sw, BOOL animated);
+
+@interface LGSwitchTarget : NSObject
+@end
+@implementation LGSwitchTarget
+- (void)changed:(UISwitch *)sw { LGStyleSwitch(sw, YES); }
+@end
+
+static void LGStyleSwitch(UISwitch *sw, BOOL animated) {
+    if (!sw.window) return;
+
+    UIView *ov = [sw viewWithTag:kSwitchOverlayTag];
+    if (!ov) {
+        ov = [UIView new];
+        ov.tag = kSwitchOverlayTag;
+        ov.userInteractionEnabled = NO;
+        ov.layer.cornerRadius = kSwH / 2.0;
+        ov.layer.cornerCurve = kCACornerCurveCircular;
+
+        UIView *knob = [UIView new];
+        knob.tag = 1;
+        knob.backgroundColor = UIColor.whiteColor;
+        knob.layer.cornerRadius = kKnobH / 2.0;
+        knob.layer.cornerCurve = kCACornerCurveCircular;
+        knob.layer.shadowColor = UIColor.blackColor.CGColor;
+        knob.layer.shadowOpacity = 0.18;
+        knob.layer.shadowRadius = 3;
+        knob.layer.shadowOffset = CGSizeMake(0, 1);
+        [ov addSubview:knob];
+        [sw addSubview:ov];
+
+        LGSwitchTarget *t = [LGSwitchTarget new];
+        objc_setAssociatedObject(sw, &kSwitchTargetKey, t, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        [sw addTarget:t action:@selector(changed:) forControlEvents:UIControlEventValueChanged];
+    }
+
+    // Hide the native drawing with an empty mask: alpha stays 1, so taps and drags still work
+    for (UIView *v in sw.subviews) {
+        if (v == ov) continue;
+        CALayer *m = v.layer.mask;
+        if (!m || ![m.name isEqualToString:@"LGHide"]) {
+            CALayer *hide = [CALayer layer];
+            hide.name = @"LGHide";
+            v.layer.mask = hide;
+        }
+    }
+    if (sw.subviews.lastObject != ov) [sw bringSubviewToFront:ov];
+
+    // Right edge stays where the system switch ends; the extra width grows to the left
+    CGSize b = sw.bounds.size;
+    CGRect of = CGRectMake(b.width - kSwW, (b.height - kSwH) / 2.0, kSwW, kSwH);
+    if (!CGRectEqualToRect(ov.frame, of)) ov.frame = of;
+
+    BOOL on = sw.isOn;
+    UIColor *onColor = sw.onTintColor ?: UIColor.systemGreenColor;
+    UIColor *offColor = [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *tc) {
+        return tc.userInterfaceStyle == UIUserInterfaceStyleDark ? [UIColor colorWithWhite:1 alpha:0.16]
+                                                                 : [UIColor colorWithWhite:0 alpha:0.09];
+    }];
+    UIView *knob = [ov viewWithTag:1];
+    CGRect kf = CGRectMake(on ? kSwW - kKnobInset - kKnobW : kKnobInset, (kSwH - kKnobH) / 2.0, kKnobW, kKnobH);
+
+    void (^apply)(void) = ^{
+        ov.backgroundColor = on ? onColor : offColor;
+        knob.frame = kf;
+        ov.alpha = sw.isEnabled ? 1.0 : 0.45;
+    };
+    if (animated && !CGRectEqualToRect(knob.frame, kf)) {
+        [UIView animateWithDuration:0.32 delay:0 usingSpringWithDamping:0.78 initialSpringVelocity:0
+                            options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
+                         animations:apply completion:nil];
+    } else {
+        apply();
+    }
+}
+
+#pragma mark - Sidebar layout of iPadOS 26 (order, names, extra rows, "Apps" page)
+// Kill switch: create /var/mobile/Library/Preferences/com.basel.settings26.nosidebar to turn this part off.
+
+static const NSInteger kPSGroupCell = 0;
+static const NSInteger kPSLinkCell = 1;
+static BOOL gLGReordering;
+static BOOL gLGSidebarFailed;
+static NSInteger gLGSidebarFailCount;
+static char kReorderMarkKey;
+static char kReorderPendingKey;
+static NSArray *gLGAppSpecs;      // specifiers shown on the "Apps" page
+static char kAppsFilterKey;
+static char kPaneBuiltForKey;
+static NSSet *gLGKeepNames;       // leftover rows that stay in the sidebar
+static NSString *const kLGFakePrefix = @"LG26_";
+
+static BOOL LGSidebarEnabled(void) {
+    static BOOL off;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        off = [[NSFileManager defaultManager] fileExistsAtPath:
+                  @"/var/mobile/Library/Preferences/com.basel.settings26.nosidebar"];
+    });
+    return !off && !gLGSidebarFailed;
+}
+
+static Class LGSpecClass(void) { return NSClassFromString(@"PSSpecifier"); }
+
+static PSSpecifier *LGGroup(NSString *ident) {
+    PSSpecifier *g = [(Class)LGSpecClass() groupSpecifierWithName:nil];
+    g.identifier = [kLGFakePrefix stringByAppendingString:ident];
+    return g;
+}
+
+@interface LGValueSource : NSObject
+@end
+@implementation LGValueSource
+- (id)lgValue:(PSSpecifier *)spec { return [spec propertyForKey:@"lgValue"]; }
+- (void)lgNoop:(PSSpecifier *)spec {}
+@end
+static LGValueSource *LGValues(void) {
+    static LGValueSource *v;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ v = [LGValueSource new]; });
+    return v;
+}
+
+// "Name" link row, "Name=Value" link row with a value on the right, "+Name" blue button row
+static PSSpecifier *LGFakeRowSpec(NSString *raw, id target) {
+    NSString *name = raw, *value = nil;
+    BOOL button = [raw hasPrefix:@"+"];
+    if (button) name = [raw substringFromIndex:1];
+    NSRange eq = [name rangeOfString:@"="];
+    if (eq.location != NSNotFound) { value = [name substringFromIndex:eq.location + 1]; name = [name substringToIndex:eq.location]; }
+    PSSpecifier *s;
+    if (button) {
+        s = [(Class)LGSpecClass() preferenceSpecifierNamed:name target:LGValues() set:NULL get:NULL detail:Nil cell:13 edit:Nil];
+        if ([s respondsToSelector:@selector(setButtonAction:)]) [s setButtonAction:@selector(lgNoop:)];
+    } else if (value) {
+        s = [(Class)LGSpecClass() preferenceSpecifierNamed:name target:LGValues() set:NULL get:@selector(lgValue:)
+                                                    detail:NSClassFromString(@"LGPaneController") cell:2 edit:Nil];
+        [s setProperty:value forKey:@"lgValue"];
+    } else {
+        s = [(Class)LGSpecClass() preferenceSpecifierNamed:name target:target set:NULL get:NULL
+                                                    detail:NSClassFromString(@"LGPaneController") cell:kPSLinkCell edit:Nil];
+    }
+    s.identifier = [kLGFakePrefix stringByAppendingString:LGSlug(name)];
+    UIImage *icon = button ? nil : LGRefIcon(name, NO);
+    if (icon) [s setProperty:icon forKey:@"iconImage"];
+    return s;
+}
+
+static PSSpecifier *LGFakeRow(NSString *name, id target) {
+    Class pane = NSClassFromString(@"LGPaneController");
+    PSSpecifier *s = [(Class)LGSpecClass() preferenceSpecifierNamed:name target:target set:NULL get:NULL
+                                                             detail:pane cell:kPSLinkCell edit:Nil];
+    s.identifier = [kLGFakePrefix stringByAppendingString:LGSlug(name)];
+    UIImage *icon = LGRefIcon(name, NO);
+    if (icon) [s setProperty:icon forKey:@"iconImage"];
+    return s;
+}
+
+
+static __weak PSSpecifier *gLGAccountSpec;
+static PSSpecifier *LGICloudRow(PSSpecifier *account, id target) {
+    gLGAccountSpec = account;
+    PSSpecifier *c = LGFakeRow(@"iCloud", target); // tapping it is redirected to the account row
+    return c;
+}
+
+static NSMutableArray *LGReorderSidebar(PSListController *lc, NSArray *orig) {
+    // 1. split into groups, dropping rows this tweak added earlier
+    NSMutableArray<NSMutableArray *> *groups = [NSMutableArray new];
+    for (PSSpecifier *sp in orig) {
+        BOOL mine = [sp.identifier hasPrefix:kLGFakePrefix];
+        if (sp.cellType == kPSGroupCell) {
+            [groups addObject:[NSMutableArray arrayWithObject:sp]];
+            continue;
+        }
+        if (mine) continue;
+        if (!groups.count) [groups addObject:[NSMutableArray arrayWithObject:LGGroup(@"top")]];
+        [groups.lastObject addObject:sp];
+    }
+    // 2. where the "settings" part starts (first group with Airplane Mode / Wi-Fi)
+    NSUInteger start = NSNotFound;
+    for (NSUInteger i = 0; i < groups.count && start == NSNotFound; i++)
+        for (PSSpecifier *sp in groups[i]) {
+            NSString *n = LGNormalizeTitle(sp.name ?: @"");
+            if ([n isEqualToString:@"Airplane Mode"] || [n isEqualToString:@"Wi-Fi"]) { start = i; break; }
+        }
+    if (start == NSNotFound) return nil; // unknown layout: leave Settings untouched
+
+    NSMutableArray *out = [NSMutableArray new];
+    PSSpecifier *account = nil;
+    for (NSUInteger i = 0; i < start; i++) {
+        [out addObjectsFromArray:groups[i]];
+        for (PSSpecifier *sp in groups[i]) if (!account && sp.cellType != kPSGroupCell) account = sp;
+    }
+
+    // 3. pool of all remaining rows (our own group headers are dropped and rebuilt)
+    NSMutableArray<PSSpecifier *> *pool = [NSMutableArray new];
+    NSMutableArray<NSNumber *> *poolGroup = [NSMutableArray new];
+    NSUInteger privacyGroup = NSNotFound;
+    for (NSUInteger i = start; i < groups.count; i++)
+        for (NSUInteger j = 1; j < groups[i].count; j++) {
+            PSSpecifier *sp = groups[i][j];
+            [pool addObject:sp];
+            [poolGroup addObject:@(i)];
+            if ([LGNormalizeTitle(sp.name ?: @"") isEqualToString:@"Privacy & Security"]) privacyGroup = i;
+        }
+
+    NSMutableSet *placed = [NSMutableSet new];
+    PSSpecifier *(^take)(NSArray<NSString *> *) = ^PSSpecifier *(NSArray<NSString *> *names) {
+        for (NSString *want in names) {
+            [placed addObject:want];
+            for (NSUInteger k = 0; k < pool.count; k++)
+                if ([LGNormalizeTitle(pool[k].name ?: @"") isEqualToString:want]) {
+                    PSSpecifier *sp = pool[k];
+                    [pool removeObjectAtIndex:k];
+                    [poolGroup removeObjectAtIndex:k];
+                    return sp;
+                }
+            // an earlier pass may have parked it on the Apps page
+            for (PSSpecifier *sp in gLGAppSpecs)
+                if ([LGNormalizeTitle(sp.name ?: @"") isEqualToString:want]) {
+                    NSMutableArray *a = [gLGAppSpecs mutableCopy];
+                    [a removeObject:sp];
+                    gLGAppSpecs = a;
+                    return sp;
+                }
+        }
+        return nil;
+    };
+    void (^addGroup)(NSString *, NSArray *) = ^(NSString *ident, NSArray *rows) {
+        if (!rows.count) return;
+        [out addObject:LGGroup(ident)];
+        [out addObjectsFromArray:rows];
+    };
+
+    // 4. iPadOS 26 groups
+    NSMutableArray *g1 = [NSMutableArray new];
+    for (NSArray *n in @[@[@"Airplane Mode"], @[@"Wi-Fi"], @[@"Bluetooth"], @[@"Cellular", @"Cellular Data", @"Mobile Data"],
+                         @[@"Personal Hotspot"], @[@"Battery"], @[@"VPN"]]) {
+        PSSpecifier *sp = take(n); if (sp) [g1 addObject:sp];
+    }
+    addGroup(@"connect", g1);
+
+    NSMutableArray *g2 = [NSMutableArray new];
+    for (NSArray *n in @[@[@"General"], @[@"Accessibility"], @[@"Apple Pencil"], @[@"Camera"], @[@"Control Center"],
+                         @[@"Display & Brightness"], @[@"Home Screen & Multitasking", @"Home Screen & Dock", @"Home Screen & App Library"],
+                         @[@"MULTI"], @[@"SEARCH"], @[@"Siri & Search", @"Siri"], @[@"Wallpaper"]]) {
+        NSString *first = n.firstObject;
+        if ([first isEqualToString:@"MULTI"]) { [g2 addObject:LGFakeRow(@"Multitasking & Gestures", lc)]; continue; }
+        if ([first isEqualToString:@"SEARCH"]) continue; // added right after Siri is found
+        PSSpecifier *sp = take(n);
+        if (!sp) continue;
+        if ([first hasPrefix:@"Home Screen"]) sp.name = @"Home Screen & App Library";
+        if ([first hasPrefix:@"Siri"]) {
+            [g2 addObject:LGFakeRow(@"Search", lc)];
+            sp.name = @"Siri";
+        }
+        [g2 addObject:sp];
+    }
+    addGroup(@"system", g2);
+
+    NSMutableArray *g3 = [NSMutableArray new];
+    for (NSArray *n in @[@[@"Notifications"], @[@"Sounds", @"Sounds & Haptics"], @[@"Focus"], @[@"Screen Time"]]) {
+        PSSpecifier *sp = take(n); if (sp) [g3 addObject:sp];
+    }
+    addGroup(@"attention", g3);
+
+    NSMutableArray *g4 = [NSMutableArray new];
+    for (NSArray *n in @[@[@"Face ID & Passcode", @"Touch ID & Passcode", @"Passcode"], @[@"Privacy & Security"]]) {
+        PSSpecifier *sp = take(n); if (sp) [g4 addObject:sp];
+    }
+    addGroup(@"security", g4);
+
+    NSMutableArray *g5 = [NSMutableArray new];
+    PSSpecifier *gc = take(@[@"Game Center"]);
+    if (gc) [g5 addObject:gc];
+    [g5 addObject:LGICloudRow(account, lc)];
+    PSSpecifier *wallet = take(@[@"Wallet & Apple Pay"]);
+    if (wallet) [g5 addObject:wallet];
+    addGroup(@"services", g5);
+
+    // 5. leftovers: rows from before Privacy stay in the sidebar, the app list moves to "Apps"
+    // First pass decides which leftovers stay in the sidebar; later passes reuse that decision,
+    // so rows Settings adds afterwards (third-party apps) always end up on the Apps page.
+    NSMutableArray *keep = [NSMutableArray new];
+    NSMutableArray *apps = [NSMutableArray arrayWithArray:gLGAppSpecs ?: @[]];
+    BOOL firstPass = (gLGKeepNames == nil);
+    NSMutableSet *keepNames = firstPass ? [NSMutableSet new] : [gLGKeepNames mutableCopy];
+    for (NSUInteger k = 0; k < pool.count; k++) {
+        NSString *n = LGNormalizeTitle(pool[k].name ?: @"");
+        BOOL toApps;
+        if (firstPass) toApps = privacyGroup != NSNotFound && poolGroup[k].unsignedIntegerValue > privacyGroup;
+        else toApps = ![keepNames containsObject:n];
+        if ([n isEqualToString:@"TV Provider"]) toApps = YES;
+        if (toApps) {
+            BOOL dup = NO;
+            for (PSSpecifier *e in apps) if (e == pool[k] || [LGNormalizeTitle(e.name ?: @"") isEqualToString:n]) { dup = YES; break; }
+            if (!dup) [apps addObject:pool[k]];
+        } else {
+            [keep addObject:pool[k]];
+            if (firstPass) [keepNames addObject:n];
+        }
+    }
+    gLGKeepNames = keepNames;
+    [apps filterUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(PSSpecifier *sp, NSDictionary *b) {
+        return ![placed containsObject:LGNormalizeTitle(sp.name ?: @"")];
+    }]];
+    Class proxyClass = NSClassFromString(@"LSApplicationProxy");
+    [apps filterUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(PSSpecifier *sp, NSDictionary *b) {
+        NSString *bid = sp.identifier;
+        if (!proxyClass || bid.length < 3 || [bid rangeOfString:@"."].location == NSNotFound || [bid hasPrefix:@"com.apple."]) return YES;
+        @try {
+            id proxy = [proxyClass performSelector:@selector(applicationProxyForIdentifier:) withObject:bid];
+            if (proxy && [proxy respondsToSelector:@selector(isInstalled)])
+                return ((BOOL (*)(id, SEL))objc_msgSend)(proxy, @selector(isInstalled));
+        } @catch (NSException *e) {}
+        return YES;
+    }]];
+    gLGAppSpecs = [apps sortedArrayUsingComparator:^NSComparisonResult(PSSpecifier *a, PSSpecifier *b) {
+        return [a.name ?: @"" localizedCaseInsensitiveCompare:b.name ?: @""];
+    }];
+    addGroup(@"apps", @[LGFakeRow(@"Apps", lc)]);
+    addGroup(@"other", keep);
+    return out;
+}
+
+static NSUInteger LGSpecSignature(NSArray *specs) {
+    NSUInteger h = specs.count;
+    for (id sp in specs) h = h * 31 + (NSUInteger)(__bridge void *)sp;
+    return h;
+}
+static void LGScheduleReorder(PSListController *lc);
+static void LGCheckReorder(PSListController *lc) {
+    if (gLGReordering || !LGSidebarEnabled() || !lc) return;
+    Ivar iv = class_getInstanceVariable(objc_getClass("PSListController"), "_specifiers");
+    NSMutableArray *cur = iv ? object_getIvar(lc, iv) : nil;
+    NSNumber *mark = cur ? objc_getAssociatedObject(cur, &kReorderMarkKey) : nil;
+    if (cur.count && (!mark || mark.unsignedIntegerValue != LGSpecSignature(cur))) LGScheduleReorder(lc);
+}
+
+static void LGScheduleReorder(PSListController *lc) {
+    if (objc_getAssociatedObject(lc, &kReorderPendingKey)) return;
+    objc_setAssociatedObject(lc, &kReorderPendingKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    __weak PSListController *weakLC = lc;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        PSListController *me = weakLC;
+        if (!me) return;
+        objc_setAssociatedObject(me, &kReorderPendingKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        gLGReordering = YES;
+        @try {
+            NSMutableArray *cur = [me specifiers];
+            NSMutableArray *n = LGReorderSidebar(me, cur);
+            if (n) {
+                [me setSpecifiers:n];
+                NSMutableArray *now = [me specifiers];
+                objc_setAssociatedObject(now, &kReorderMarkKey, @(LGSpecSignature(now)), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            } else if (cur) {
+                objc_setAssociatedObject(cur, &kReorderMarkKey, @(LGSpecSignature(cur)), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            }
+        } @catch (NSException *e) {
+            NSLog(@"[Settings26] sidebar layout failed: %@", e);
+            if (++gLGSidebarFailCount >= 3) gLGSidebarFailed = YES;
+        }
+        gLGReordering = NO;
+    });
+}
+
+#pragma mark - Choice lists (Search Engine, Default Apps rows)
+
+static NSDictionary<NSString *, NSArray<NSString *> *> *LGChoices(void) {
+    return @{ @"Search Engine": @[@"Google", @"Yahoo", @"Bing", @"DuckDuckGo", @"Ecosia"],
+              @"Email": @[@"Mail"], @"Messaging": @[@"Messages"], @"Calling": @[@"None"],
+              @"Call Filtering": @[@"None"], @"Browser App": @[@"Safari"],
+              @"Translation": @[@"Translate", @"Google Translate"], @"Passwords & Codes": @[@"Passwords"] };
+}
+static NSString *LGChoiceValue(NSString *page) {
+    NSString *v = [[[NSUserDefaults alloc] initWithSuiteName:@"com.basel.settings26.look"]
+                      stringForKey:[@"LG26_choice_" stringByAppendingString:LGSlug(page)]];
+    return v ?: LGChoices()[page].firstObject;
+}
+
+#pragma mark - Pages for rows iPadOS 16 doesn't have ("Apps", "Family", "iCloud", ...)
+
+static NSMutableArray *LGPaneSpecifiers(PSListController *pc) {
+    NSString *title = pc.specifier.name ?: pc.title ?: @"";
+    pc.title = title;
+    NSMutableArray *out = [NSMutableArray new];
+
+    if ([title isEqualToString:@"Apps"]) {
+        [out addObject:LGGroup(@"apps_top")];
+        PSSpecifier *def = LGFakeRow(@"Default Apps", pc);
+        [def setProperty:@"Manage default apps on iPad" forKey:@"lgSubtitle"];
+        [def setProperty:@64 forKey:@"height"];
+        [out addObject:def];
+        NSString *letter = nil;
+        NSString *filter = objc_getAssociatedObject(pc, &kAppsFilterKey);
+        NSMutableArray *alpha = [NSMutableArray new], *other = [NSMutableArray new];
+        for (PSSpecifier *sp in gLGAppSpecs) {
+            unichar c = sp.name.length ? [sp.name.uppercaseString characterAtIndex:0] : '#';
+            [((c >= 'A' && c <= 'Z') ? alpha : other) addObject:sp];
+        }
+        for (PSSpecifier *sp in [alpha arrayByAddingObjectsFromArray:other]) {
+            NSString *n = sp.name ?: @"";
+            if (filter.length && [n rangeOfString:filter options:NSCaseInsensitiveSearch].location == NSNotFound) continue;
+            NSString *l = n.length ? [n substringToIndex:1].uppercaseString : @"#";
+            unichar c = [l characterAtIndex:0];
+            if (!(c >= 'A' && c <= 'Z')) l = @"#";
+            if (![l isEqualToString:letter]) {
+                letter = l;
+                PSSpecifier *g = [(Class)LGSpecClass() groupSpecifierWithName:l];
+                g.identifier = [kLGFakePrefix stringByAppendingFormat:@"letter_%@", l];
+                [out addObject:g];
+            }
+            [out addObject:sp];
+        }
+        [out addObject:LGGroup(@"apps_hidden")];
+        [out addObject:LGFakeRow(@"Hidden Apps", pc)];
+        return out;
+    }
+
+    PSSpecifier *(^toggle)(NSString *) = ^PSSpecifier *(NSString *name) {
+        PSSpecifier *sp = [(Class)LGSpecClass() preferenceSpecifierNamed:name target:pc set:@selector(lgSet:specifier:)
+                                                                     get:@selector(lgGet:) detail:Nil cell:6 edit:Nil];
+        sp.identifier = [kLGFakePrefix stringByAppendingString:LGSlug(name)];
+        [sp setProperty:sp.identifier forKey:@"key"];
+        return sp;
+    };
+    PSSpecifier *(^group)(NSString *, NSString *, NSString *) = ^PSSpecifier *(NSString *ident, NSString *header, NSString *footer) {
+        PSSpecifier *g = [(Class)LGSpecClass() groupSpecifierWithName:header];
+        g.identifier = [kLGFakePrefix stringByAppendingString:ident];
+        if (footer) [g setProperty:footer forKey:@"footerText"];
+        return g;
+    };
+
+    if ([title isEqualToString:@"AppleCare & Warranty"]) {
+        [out addObject:group(@"ac_this", @"This Device", nil)];
+        PSSpecifier *dev = LGFakeRowSpec(UIDevice.currentDevice.name, pc);
+        [dev setProperty:@"Coverage Expired" forKey:@"lgSubtitle"];
+        [dev setProperty:@64 forKey:@"height"];
+        UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:22 weight:UIImageSymbolWeightRegular];
+        UIImage *ipad = [[UIImage systemImageNamed:@"ipad" withConfiguration:cfg]
+                            imageWithTintColor:UIColor.secondaryLabelColor renderingMode:UIImageRenderingModeAlwaysOriginal];
+        if (ipad) [dev setProperty:ipad forKey:@"iconImage"];
+        [out addObject:dev];
+        return out;
+    }
+
+    if ([title isEqualToString:@"Health Data"]) {
+        [out addObject:group(@"hd_medical", @"Medical Details", nil)];
+        [out addObject:LGFakeRowSpec(@"Health Details", pc)];
+        [out addObject:group(@"hd_data", @"Data", nil)];
+        [out addObject:LGFakeRowSpec(@"Data Access & Devices", pc)];
+        return out;
+    }
+
+    if ([title isEqualToString:@"Multitasking & Gestures"]) {
+        // the three mode cards are the table header (built in -viewDidLayoutSubviews)
+        [out addObject:group(@"mg_gestures", @"Gestures",
+            @"- Go home by pinching with four or five fingers.\n- Switch apps by swiping left and right with four or five fingers.\n- Open the App Switcher by pinching and pausing with four or five fingers.")];
+        [out addObject:toggle(@"Four & Five Finger App Switching")];
+        [out addObject:group(@"mg_productivity", nil,
+            @"- Double-tap with three fingers to undo.\n- Pinch and spread with three fingers to copy and paste.\n- Swipe left with three fingers to undo and swipe right to redo.")];
+        [out addObject:toggle(@"Productivity Gestures")];
+        [out addObject:group(@"mg_shake", nil, nil)];
+        [out addObject:toggle(@"Shake to Undo")];
+        return out;
+    }
+
+    if ([title isEqualToString:@"Search"]) {
+        [out addObject:group(@"s_lookup", @"Search and Look Up",
+            @"Allow content from Apple and other partners to be shown when searching or when looking up text or objects in photos. About Search & Privacy\u2026")];
+        [out addObject:toggle(@"Show Recent Searches")];
+        [out addObject:toggle(@"Show Related Content")];
+        [out addObject:group(@"s_engine", nil, nil)];
+        [out addObject:LGFakeRow(@"Search Engine", pc)];
+        [out addObject:group(@"s_improve", nil,
+            @"Help improve Search by allowing Apple to store the searches you enter into Safari, Siri, and Spotlight in a way that is not linked to you.\n\nSearches include lookups of general knowledge, and requests to do things like play music and get directions. About Search & Privacy\u2026")];
+        [out addObject:toggle(@"Help Apple Improve Search")];
+        [out addObject:group(@"s_apps", nil, nil)];
+        [out addObject:LGFakeRow(@"App Clips", pc)];
+        for (PSSpecifier *app in gLGAppSpecs) [out addObject:app];
+        return out;
+    }
+
+    NSArray *choices = LGChoices()[title];
+    if (choices) {
+        [out addObject:LGGroup(@"choices")];
+        for (NSString *c in choices) {
+            PSSpecifier *sp = [(Class)LGSpecClass() preferenceSpecifierNamed:c target:pc set:NULL get:NULL
+                                                                      detail:Nil cell:4 edit:Nil];
+            sp.identifier = [kLGFakePrefix stringByAppendingFormat:@"choice_%@", LGSlug(c)];
+            [out addObject:sp];
+        }
+        return out;
+    }
+
+    if ([title isEqualToString:@"Default Apps"]) {
+        NSUInteger kb = UITextInputMode.activeInputModes.count;
+        NSArray *sections = @[
+            @[@[@"Email", @"Mail"], @[@"Messaging", @"Messages"], @[@"Calling", @"None"], @[@"Call Filtering", @"None"]],
+            @[@[@"Browser App", @"Safari"], @[@"Translation", @"Translate"], @[@"Passwords & Codes", @"Passwords"],
+              @[@"Keyboards", [NSString stringWithFormat:@"%lu", (unsigned long)MAX(kb, (NSUInteger)1)]]]];
+        NSUInteger gi = 0;
+        for (NSArray *sec in sections) {
+            [out addObject:LGGroup([NSString stringWithFormat:@"defaults_%lu", (unsigned long)gi++])];
+            for (NSArray *row in sec) {
+                PSSpecifier *sp = [(Class)LGSpecClass() preferenceSpecifierNamed:row[0] target:pc set:NULL
+                                                                             get:@selector(lgValue:)
+                                                                          detail:NSClassFromString(@"LGPaneController")
+                                                                            cell:2 edit:Nil];
+                sp.identifier = [kLGFakePrefix stringByAppendingString:LGSlug(row[0])];
+                [sp setProperty:(LGChoices()[row[0]] ? LGChoiceValue(row[0]) : row[1]) forKey:@"lgValue"];
+                [out addObject:sp];
+            }
+        }
+        return out;
+    }
+
+    PSSpecifier *g = LGGroup(@"pane");
+    if (![title isEqualToString:@"Hidden Apps"])
+        [g setProperty:@"This page is part of the iPadOS 26 look and has no settings on iPadOS 16." forKey:@"footerText"];
+    [out addObject:g];
+    return out;
+}
+
+#pragma mark - iPadOS 26 bar buttons (Edit / Done / Cancel / Save as glass capsules)
+
+@interface LGBarItemProxy : NSObject
+@property (nonatomic, strong) UIBarButtonItem *item;
+@property (nonatomic, weak) UIButton *button;
+@property (nonatomic, copy) NSString *fixedTitle;
+@end
+@implementation LGBarItemProxy
+- (void)attach {
+    [self.item addObserver:self forKeyPath:@"enabled" options:0 context:NULL];
+    [self.item addObserver:self forKeyPath:@"title" options:0 context:NULL];
+    [self sync];
+}
+- (void)observeValueForKeyPath:(NSString *)k ofObject:(id)o change:(NSDictionary *)c context:(void *)ctx {
+    dispatch_async(dispatch_get_main_queue(), ^{ [self sync]; });
+}
+- (void)sync {
+    UIButton *b = self.button;
+    if (!b) return;
+    NSString *t = self.item.title.length ? self.item.title : self.fixedTitle;
+    UIButtonConfiguration *cfg = b.configuration;
+    if (![cfg.title isEqualToString:t]) { cfg.title = t; b.configuration = cfg; }
+    b.enabled = self.item.isEnabled;
+}
+- (void)tap {
+    UIBarButtonItem *it = self.item;
+    if (it.action) [UIApplication.sharedApplication sendAction:it.action to:it.target from:it forEvent:nil];
+}
+- (void)dealloc {
+    @try { [_item removeObserver:self forKeyPath:@"enabled"]; [_item removeObserver:self forKeyPath:@"title"]; }
+    @catch (NSException *e) {}
+}
+@end
+
+static char kBarProxyKey;
+
+static UIBarButtonItem *LGWrapBarItem(UIBarButtonItem *it) {
+    if (!it || it.customView) return nil;
+    NSString *fixed = nil;
+    BOOL bold = it.style == UIBarButtonItemStyleDone;
+    NSInteger sys = -1;
+    @try { id v = [it valueForKey:@"systemItem"]; if ([v respondsToSelector:@selector(integerValue)]) sys = [v integerValue]; }
+    @catch (NSException *e) {}
+    BOOL isSystem = NO;
+    @try { isSystem = [[it valueForKey:@"isSystemItem"] boolValue]; } @catch (NSException *e) { isSystem = sys >= 0 && !it.title; }
+    if (isSystem || !it.title) {
+        switch (sys) {
+            case UIBarButtonSystemItemDone:   fixed = @"Done"; bold = YES; break;
+            case UIBarButtonSystemItemCancel: fixed = @"Cancel"; break;
+            case UIBarButtonSystemItemEdit:   fixed = @"Edit"; break;
+            case UIBarButtonSystemItemSave:   fixed = @"Save"; bold = YES; break;
+            default: break;
+        }
+    }
+    if (!fixed && !it.title.length) return nil; // icon-only buttons stay as they are
+
+    UIButtonConfiguration *cfg = [UIButtonConfiguration filledButtonConfiguration];
+    cfg.cornerStyle = UIButtonConfigurationCornerStyleCapsule;
+    cfg.baseBackgroundColor = [UIColor colorWithRed:38/255.0 green:38/255.0 blue:40/255.0 alpha:1];
+    cfg.baseForegroundColor = UIColor.whiteColor;
+    cfg.contentInsets = NSDirectionalEdgeInsetsMake(11, 17, 11, 17);
+    cfg.title = it.title.length ? it.title : fixed;
+    UIFont *font = [UIFont systemFontOfSize:17 weight:bold ? UIFontWeightSemibold : UIFontWeightRegular];
+    cfg.titleTextAttributesTransformer = ^NSDictionary *(NSDictionary *in) {
+        NSMutableDictionary *o = [in mutableCopy];
+        o[NSFontAttributeName] = font;
+        return o;
+    };
+    UIButton *b = [UIButton buttonWithConfiguration:cfg primaryAction:nil];
+    b.layer.borderWidth = 0.5;
+    b.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.12].CGColor;
+    b.layer.cornerRadius = 22;
+    b.layer.cornerCurve = kCACornerCurveCircular;
+
+    LGBarItemProxy *px = [LGBarItemProxy new];
+    px.item = it;
+    px.button = b;
+    px.fixedTitle = fixed;
+    [b addTarget:px action:@selector(tap) forControlEvents:UIControlEventTouchUpInside];
+
+    UIBarButtonItem *w = [[UIBarButtonItem alloc] initWithCustomView:b];
+    objc_setAssociatedObject(w, &kBarProxyKey, px, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [px attach];
+    return w;
+}
+
+static NSArray *LGWrapItems(NSArray *items, BOOL *changed) {
+    if (!items.count) return items;
+    NSMutableArray *o = [NSMutableArray arrayWithCapacity:items.count];
+    for (UIBarButtonItem *it in items) {
+        UIBarButtonItem *w = LGWrapBarItem(it);
+        if (w) *changed = YES;
+        [o addObject:w ?: it];
+    }
+    return o;
+}
+
+static void LGWrapNavItem(UINavigationItem *ni) {
+    BOOL ch = NO;
+    NSArray *r = LGWrapItems(ni.rightBarButtonItems, &ch);
+    if (ch) ni.rightBarButtonItems = r;
+    ch = NO;
+    NSArray *l = LGWrapItems(ni.leftBarButtonItems, &ch);
+    if (ch) ni.leftBarButtonItems = l;
+}
+
+static char kNavWrapPendingKey;
+static BOOL LGIsDetailBar(UINavigationBar *bar) {
+    UIResponder *r = bar;
+    while (r && ![r isKindOfClass:[UINavigationController class]]) r = r.nextResponder;
+    UINavigationController *nav = (UINavigationController *)r;
+    UISplitViewController *split = nav.splitViewController;
+    return split && split.viewControllers.count >= 2 && split.viewControllers.lastObject == nav;
+}
+
+#pragma mark - "Multitasking & Gestures": the three mode cards from iPadOS 26
+
+static NSString *const kLGModeKey = @"LG26_multitasking_mode";
+
+@interface LGModeTarget : NSObject
+@property (nonatomic, weak) UIView *card;
+- (void)pick:(UITapGestureRecognizer *)g;
+@end
+
+static void LGRefreshModes(UIView *card) {
+    NSInteger sel = [[[NSUserDefaults alloc] initWithSuiteName:@"com.basel.settings26.look"] integerForKey:kLGModeKey];
+    for (NSInteger i = 0; i < 3; i++) {
+        UIImageView *radio = (UIImageView *)[card viewWithTag:100 + i];
+        UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:20 weight:UIImageSymbolWeightRegular];
+        radio.image = [UIImage systemImageNamed:(i == sel ? @"checkmark.circle.fill" : @"circle") withConfiguration:cfg];
+        radio.tintColor = i == sel ? UIColor.systemBlueColor : UIColor.tertiaryLabelColor;
+    }
+}
+
+@implementation LGModeTarget
+- (void)pick:(UITapGestureRecognizer *)g {
+    [[[NSUserDefaults alloc] initWithSuiteName:@"com.basel.settings26.look"] setInteger:g.view.tag - 200 forKey:kLGModeKey];
+    LGRefreshModes(self.card);
+}
+@end
+
+static char kModeHeaderKey;
+static char kModeTargetKey;
+
+static void LGMultitaskingHeader(UIViewController *vc) {
+    UITableView *tv = LGFind(vc.view, [UITableView class]);
+    if (!tv || tv.bounds.size.width < 300 || [tv numberOfSections] == 0) return;
+    CGRect r0 = [tv rectForRowAtIndexPath:[NSIndexPath indexPathForRow:0 inSection:0]];
+    UITableViewCell *c0 = tv.visibleCells.firstObject;
+    if (c0.bounds.size.width > 100) r0 = c0.frame;
+    CGFloat x = r0.size.width > 100 ? r0.origin.x : 20, w = r0.size.width > 100 ? r0.size.width : tv.bounds.size.width - 40;
+
+    UIView *wrap = objc_getAssociatedObject(tv, &kModeHeaderKey);
+    if (!wrap) {
+        wrap = [UIView new];
+        UIView *card = [UIView new];
+        card.tag = 1;
+        card.backgroundColor = UIColor.secondarySystemGroupedBackgroundColor;
+        card.layer.cornerRadius = kSectionRadius;
+        card.layer.cornerCurve = kCACornerCurveContinuous;
+        [wrap addSubview:card];
+        LGModeTarget *t = [LGModeTarget new];
+        t.card = card;
+        objc_setAssociatedObject(tv, &kModeTargetKey, t, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        NSArray *titles = @[@"Full Screen Apps", @"Windowed Apps", @"Stage Manager"];
+        NSArray *descs = @[@"Always use apps full screen and swipe Home to switch between them.",
+                           @"Resize and arrange multiple windows in a single space to multitask with ease.",
+                           @"Arrange windows across multiple groups for a focused multitasking experience."];
+        NSArray *imgs = @[@"mt_full", @"mt_windowed", @"mt_stage"];
+        for (NSInteger i = 0; i < 3; i++) {
+            UIView *col = [UIView new];
+            col.tag = 200 + i;
+            UIImageView *pic = [[UIImageView alloc] initWithImage:LGAtlasPart(imgs[i])];
+            pic.tag = 1; pic.contentMode = UIViewContentModeScaleAspectFit;
+            UIImageView *radio = [UIImageView new]; radio.tag = 100 + i;
+            UILabel *tl = [UILabel new]; tl.tag = 3; tl.text = titles[i];
+            tl.font = [UIFont systemFontOfSize:20]; tl.textColor = UIColor.labelColor;
+            UILabel *dl = [UILabel new]; dl.tag = 4; dl.numberOfLines = 0;
+            NSMutableAttributedString *d = [[NSMutableAttributedString alloc] initWithString:descs[i] attributes:@{
+                NSFontAttributeName: [UIFont systemFontOfSize:15], NSForegroundColorAttributeName: UIColor.secondaryLabelColor }];
+            if (i == 2) [d appendAttributedString:[[NSAttributedString alloc] initWithString:@" Learn more…" attributes:@{
+                NSFontAttributeName: [UIFont systemFontOfSize:15], NSForegroundColorAttributeName: UIColor.systemBlueColor }]];
+            dl.attributedText = d;
+            for (UIView *v in @[pic, radio, tl, dl]) [col addSubview:v];
+            [col addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:t action:@selector(pick:)]];
+            [card addSubview:col];
+        }
+        LGRefreshModes(card);
+        objc_setAssociatedObject(tv, &kModeHeaderKey, wrap, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+
+    UIView *card = [wrap viewWithTag:1];
+    CGFloat pad = 30, gap = 30, colW = (w - pad * 2 - gap * 2) / 3.0, h = 0;
+    for (NSInteger i = 0; i < 3; i++) {
+        UIView *col = [card viewWithTag:200 + i];
+        UIImageView *pic = (UIImageView *)[col viewWithTag:1];
+        UIView *radio = [col viewWithTag:100 + i];
+        UILabel *tl = (UILabel *)[col viewWithTag:3], *dl = (UILabel *)[col viewWithTag:4];
+        CGSize is = pic.image.size;
+        CGFloat ph = is.width > 0 ? colW * is.height / is.width : colW * 0.75;
+        pic.frame = CGRectMake(0, 0, colW, ph);
+        radio.frame = CGRectMake(0, ph + 14, 26, 26);
+        tl.frame = CGRectMake(36, ph + 13, colW - 36, 28);
+        CGFloat dh = ceil([dl sizeThatFits:CGSizeMake(colW, CGFLOAT_MAX)].height);
+        dl.frame = CGRectMake(0, ph + 50, colW, dh);
+        CGFloat ch = ph + 50 + dh;
+        col.frame = CGRectMake(pad + i * (colW + gap), pad, colW, ch);
+        h = MAX(h, ch);
+    }
+    card.frame = CGRectMake(x, 24, w, h + pad * 2);
+    CGFloat totalH = 24 + h + pad * 2 + 16;
+    if (tv.tableHeaderView != wrap || fabs(wrap.frame.size.height - totalH) > 1 || fabs(wrap.frame.size.width - tv.bounds.size.width) > 1) {
+        wrap.frame = CGRectMake(0, 0, tv.bounds.size.width, totalH);
+        tv.tableHeaderView = wrap;
+    }
+}
+
+#pragma mark - Full-width sections in the detail column
+
+static char kWideFallbackKey;
+static const CGFloat kSectionSide = 20.0;
+
+static BOOL LGWideTable(UITableView *tv) {
+    if (!tv || tv.style == UITableViewStylePlain || tv.bounds.size.width < 600) return NO;
+    if (LGIsSidebarTable(tv)) return NO;
+    UIViewController *vc = LGOwnerVC(tv);
+    if (!vc) return NO;
+    UINavigationController *nav = vc.navigationController;
+    UISplitViewController *split = nav.splitViewController;
+    return split && split.viewControllers.count >= 2 && split.viewControllers.lastObject == nav;
+}
+static UIEdgeInsets LGClampInset(UIEdgeInsets i) {
+    if (i.left > 30) i.left = kSectionSide;
+    if (i.right > 30) i.right = kSectionSide;
+    return i;
+}
+// private UIKit inset that Settings uses for its centred "cards" (hooked only if it exists)
+static void (*orig_setSecInset)(UITableView *, SEL, UIEdgeInsets);
+static void new_setSecInset(UITableView *self, SEL _cmd, UIEdgeInsets i) {
+    orig_setSecInset(self, _cmd, LGWideTable(self) ? LGClampInset(i) : i);
+}
+static UIEdgeInsets (*orig_secInset)(UITableView *, SEL);
+static UIEdgeInsets new_secInset(UITableView *self, SEL _cmd) {
+    UIEdgeInsets i = orig_secInset(self, _cmd);
+    return LGWideTable(self) ? LGClampInset(i) : i;
+}
+
+#pragma mark - Row order inside panes (General, Privacy & Security) like iPadOS 26
+// Row syntax: "Name|alias|alias". Prefix "*" = add a look-only row if iPadOS 16 doesn't have it,
+// "^" = borrow the row from the sidebar list (e.g. TV Provider), "@rest" = every row not listed.
+
+static NSDictionary<NSString *, NSArray *> *LGPageLayouts(void) {
+    static NSDictionary *d;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ d = @{
+        @"General": @[
+            @{@"rows": @[@"About", @"Software Update", @"iPad Storage"]},
+            @{@"rows": @[@"*AppleCare & Warranty"]},
+            @{@"rows": @[@"*Health Data"]},
+            @{@"rows": @[@"AirDrop", @"AirPlay & Continuity|AirPlay & Handoff", @"*Screen Capture"]},
+            @{@"rows": @[@"*AutoFill & Passwords", @"Background App Refresh", @"Date & Time", @"Dictionary", @"Fonts",
+                         @"Game Controller", @"Keyboard", @"Language & Region", @"@rest"]},
+            @{@"drop": @[@"Picture in Picture", @"Gestures"]},
+            @{@"rows": @[@"^TV Provider"]},
+            @{@"rows": @[@"VPN & Device Management"]},
+            @{@"rows": @[@"Legal & Regulatory"]},
+            @{@"rows": @[@"Transfer or Reset iPad"]},
+            @{@"rows": @[@"Shut Down"]},
+        ],
+        @"Privacy & Security": @[
+            @{@"rows": @[@"Location Services", @"Tracking"]},
+            @{@"rows": @[@"Calendars", @"Contacts", @"Files & Folders|Files and Folders", @"Focus", @"Health Data|Health",
+                         @"HomeKit", @"Media & Apple Music", @"Passkeys Access for Web Browsers", @"Photos", @"Reminders"]},
+            @{@"rows": @[@"*Accessories=0", @"Bluetooth", @"Camera", @"*Critical Messages=0", @"Local Network", @"Microphone",
+                         @"Motion & Fitness", @"Nearby Interactions", @"*Paired Devices=0", @"Research Sensor & Usage Data",
+                         @"Speech Recognition", @"@rest"]},
+            @{@"rows": @[@"*Journaling Suggestions"]},
+            @{@"rows": @[@"*Blocked Contacts"]},
+            @{@"rows": @[@"Sensitive Content Warning"]},
+            @{@"rows": @[@"Analytics & Improvements", @"Apple Advertising"]},
+            @{@"header": @"Transparency Logs", @"rows": @[@"App Privacy Report"]},
+            @{@"header": @"Security", @"rows": @[@"*Wired Accessories=Automatically Allow When Unlocked",
+                                                 @"*Background Security Improvements", @"Developer Mode", @"Lockdown Mode"]},
+        ],
+        @"Siri": @[
+            @{@"header": @"Siri Requests",
+              @"footer": @"Voice input is processed on iPad, but transcripts of your requests are sent to Apple. About Siri & Privacy\u2026",
+              @"rows": @[@"Language", @"Talk to Siri|Listen for \u201CHey Siri\u201D|Listen for \"Hey Siri\"", @"Press Top Button for Siri",
+                         @"Allow Siri When Locked", @"Voice|Siri Voice", @"Siri Responses", @"*Call Hang Up=Off",
+                         @"Announce Calls", @"Announce Notifications", @"Messaging with Siri|Automatically Send Messages",
+                         @"Siri & Dictation History", @"My Information"]},
+            @{@"header": @"Suggestions",
+              @"footer": @"Apple can make suggestions in Search, on Home Screen and Lock Screen, when sharing, or when you may want to listen to media.",
+              @"rows": @[@"Suggest Apps Before Searching|Show Suggestions", @"+Reset Hidden Suggestions", @"Allow Notifications",
+                         @"Show in App Library", @"Show When Sharing", @"Show Listening Suggestions|Show When Listening"]},
+            @{@"header": @"Siri App Access", @"rows": @[@"App Clips", @"*Apps"]},
+            @{@"dropRest": @YES},
+        ],
+    }; });
+    return d;
+}
+
+static NSMutableArray *LGReorderPane(PSListController *lc, NSArray *orig, NSArray *layout) {
+    NSMutableArray<PSSpecifier *> *pool = [NSMutableArray new];
+    NSMutableDictionary<NSString *, PSSpecifier *> *firstFooter = [NSMutableDictionary new];
+    PSSpecifier *lastGroup = nil;
+    for (PSSpecifier *sp in orig) {
+        if (sp.cellType == kPSGroupCell) { lastGroup = sp; continue; }
+        if ([sp.identifier hasPrefix:kLGFakePrefix] && !sp.target) continue;
+        if ([sp.identifier hasPrefix:kLGFakePrefix] && [sp.detailControllerClass isEqual:NSClassFromString(@"LGPaneController")]) continue;
+        [pool addObject:sp];
+        // keep the footer text that described this row's group (e.g. Location Services)
+        id footer = [lastGroup propertyForKey:@"footerText"];
+        if (footer && !lastGroup.identifier.length) firstFooter[LGNormalizeTitle(sp.name ?: @"")] = lastGroup;
+        else if (footer && ![lastGroup.identifier hasPrefix:kLGFakePrefix]) firstFooter[LGNormalizeTitle(sp.name ?: @"")] = lastGroup;
+    }
+    if (!pool.count) return nil;
+
+    // rows the reference page doesn't have
+    BOOL dropRest = NO;
+    for (NSDictionary *g in layout) {
+        if ([g[@"dropRest"] boolValue]) dropRest = YES;
+        for (NSString *n in g[@"drop"]) {
+            NSIndexSet *ix = [pool indexesOfObjectsPassingTest:^BOOL(PSSpecifier *sp, NSUInteger i, BOOL *st) {
+                return [LGNormalizeTitle(sp.name ?: @"") isEqualToString:n]; }];
+            [pool removeObjectsAtIndexes:ix];
+        }
+    }
+
+    NSMutableArray *out = [NSMutableArray new];
+    NSUInteger restAt = NSNotFound, gi = 0;
+    for (NSDictionary *g in layout) {
+        if (!g[@"rows"]) continue;
+        NSMutableArray *rows = [NSMutableArray new];
+        BOOL wantsRest = NO;
+        PSSpecifier *footerSource = nil;
+        for (NSString *raw in g[@"rows"]) {
+            if ([raw isEqualToString:@"@rest"]) { wantsRest = YES; continue; }
+            BOOL fake = [raw hasPrefix:@"*"] || [raw hasPrefix:@"+"], borrow = [raw hasPrefix:@"^"];
+            if (fake) {
+                // look-only row, but if iPadOS 16 already has a real one with that name, use the real one
+                NSString *body = [raw substringFromIndex:1];
+                NSString *nm = [[body componentsSeparatedByString:@"="].firstObject componentsSeparatedByString:@"|"].firstObject;
+                PSSpecifier *real = nil;
+                for (PSSpecifier *sp in pool) if ([LGNormalizeTitle(sp.name ?: @"") isEqualToString:nm]) { real = sp; break; }
+                if (real) { [pool removeObject:real]; [rows addObject:real]; }
+                else [rows addObject:LGFakeRowSpec([raw hasPrefix:@"+"] ? raw : body, lc)];
+                continue;
+            }
+            NSArray *names = [((fake || borrow) ? [raw substringFromIndex:1] : raw) componentsSeparatedByString:@"|"];
+            PSSpecifier *found = nil;
+            for (NSString *n in names) {
+                for (PSSpecifier *sp in pool)
+                    if ([LGNormalizeTitle(sp.name ?: @"") isEqualToString:n]) { found = sp; break; }
+                if (found) break;
+            }
+            if (found) {
+                [pool removeObject:found];
+                if (![found.name isEqualToString:names.firstObject]) found.name = names.firstObject;
+                if (!footerSource) footerSource = firstFooter[LGNormalizeTitle(names.lastObject)] ?: firstFooter[names.firstObject];
+                [rows addObject:found];
+            } else if (borrow) {
+                for (PSSpecifier *sp in gLGAppSpecs)
+                    if ([LGNormalizeTitle(sp.name ?: @"") isEqualToString:names.firstObject]) { [rows addObject:sp]; break; }
+            }
+        }
+        if (wantsRest) restAt = out.count + 1 + rows.count; // filled after every group is placed
+        if (!rows.count && !wantsRest) continue;
+        PSSpecifier *grp = [(Class)LGSpecClass() groupSpecifierWithName:g[@"header"]];
+        grp.identifier = [kLGFakePrefix stringByAppendingFormat:@"pane_%lu", (unsigned long)gi++];
+        id footer = g[@"footer"];
+        if (!footer && rows.count == 1) footer = [footerSource propertyForKey:@"footerText"];
+        if (footer) [grp setProperty:footer forKey:@"footerText"];
+        [out addObject:grp];
+        [out addObjectsFromArray:rows];
+        if (wantsRest) restAt = out.count;
+    }
+    if (pool.count && !dropRest) {
+        if (restAt != NSNotFound && restAt <= out.count)
+            [out insertObjects:pool atIndexes:[NSIndexSet indexSetWithIndexesInRange:NSMakeRange(restAt, pool.count)]];
+        else {
+            [out addObject:LGGroup(@"pane_rest")];
+            [out addObjectsFromArray:pool];
+        }
+    }
+    return out;
+}
+
+static char kPaneMarkKey;
+static char kPanePendingKey;
+static BOOL gLGPaneReordering;
+
+static NSString *LGPaneTitle(PSListController *lc) {
+    NSString *t = LGNormalizeTitle(lc.specifier.name ?: lc.title ?: @"");
+    if ([t isEqualToString:@"Siri & Search"]) t = @"Siri";
+    return t;
+}
+static NSArray *LGLayoutFor(PSListController *lc) {
+    if ([lc isKindOfClass:NSClassFromString(@"LGPaneController")] ||
+        [lc isKindOfClass:NSClassFromString(@"PSUIPrefsListController")]) return nil;
+    return LGPageLayouts()[LGPaneTitle(lc)];
+}
+
+static NSMutableArray *LGSpecialPane(PSListController *lc, NSArray *orig, NSString *title) {
+    NSMutableArray *out = [orig mutableCopy];
+    if ([title isEqualToString:@"iPad Storage"]) {
+        for (PSSpecifier *sp in out) if ([sp.identifier isEqualToString:@"LG26_hidden_apps"]) return nil;
+        NSUInteger os = NSNotFound;
+        for (NSUInteger i = 0; i < out.count; i++)
+            if ([LGNormalizeTitle(((PSSpecifier *)out[i]).name ?: @"") isEqualToString:@"iPadOS"]) { os = i; break; }
+        if (os == NSNotFound) return nil;
+        NSUInteger g = os;
+        while (g > 0 && ((PSSpecifier *)out[g]).cellType != kPSGroupCell) g--;
+        [out insertObjects:@[LGGroup(@"storage_hidden"), LGFakeRow(@"Hidden Apps", lc)]
+                 atIndexes:[NSIndexSet indexSetWithIndexesInRange:NSMakeRange(g, 2)]];
+        return out;
+    }
+    if ([title isEqualToString:@"Battery"]) {
+        // Battery Percentage / Low Power Mode go below the usage charts, like iPadOS 26
+        NSUInteger at = NSNotFound;
+        for (NSUInteger i = 0; i < out.count; i++)
+            if ([LGNormalizeTitle(((PSSpecifier *)out[i]).name ?: @"") isEqualToString:@"Battery Percentage"]) { at = i; break; }
+        if (at == NSNotFound) return nil;
+        NSUInteger start = at;
+        while (start > 0 && ((PSSpecifier *)out[start]).cellType != kPSGroupCell) start--;
+        NSUInteger end = at + 1;
+        while (end < out.count && ((PSSpecifier *)out[end]).cellType != kPSGroupCell) end++;
+        if (end >= out.count) return nil; // already last
+        NSArray *block = [out subarrayWithRange:NSMakeRange(start, end - start)];
+        [out removeObjectsInRange:NSMakeRange(start, end - start)];
+        [out addObjectsFromArray:block];
+        return out;
+    }
+    return nil;
+}
+
+static void LGCheckPane(PSListController *lc) {
+    if (gLGPaneReordering || !LGSidebarEnabled()) return;
+    NSArray *layout = LGLayoutFor(lc);
+    NSString *ptitle = LGPaneTitle(lc);
+    BOOL special = [ptitle isEqualToString:@"iPad Storage"] || [ptitle isEqualToString:@"Battery"];
+    if (!layout && !special) return;
+    if ([ptitle isEqualToString:@"Siri"] && ![lc.title isEqualToString:@"Siri"]) {
+        lc.title = @"Siri";
+        lc.navigationItem.title = @"Siri";
+    }
+    Ivar iv = class_getInstanceVariable(objc_getClass("PSListController"), "_specifiers");
+    NSMutableArray *cur = iv ? object_getIvar(lc, iv) : nil;
+    if (!cur.count) return;
+    NSNumber *mark = objc_getAssociatedObject(cur, &kPaneMarkKey);
+    if (mark && mark.unsignedIntegerValue == LGSpecSignature(cur)) return;
+    if (objc_getAssociatedObject(lc, &kPanePendingKey)) return;
+    objc_setAssociatedObject(lc, &kPanePendingKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    __weak PSListController *w = lc;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        PSListController *me = w;
+        if (!me) return;
+        objc_setAssociatedObject(me, &kPanePendingKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        gLGPaneReordering = YES;
+        @try {
+            NSMutableArray *now = [me specifiers];
+            NSMutableArray *n = layout ? LGReorderPane(me, now, layout) : LGSpecialPane(me, now, ptitle);
+            if (n) { [me setSpecifiers:n]; now = [me specifiers]; }
+            if (now) objc_setAssociatedObject(now, &kPaneMarkKey, @(LGSpecSignature(now)), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        } @catch (NSException *e) {
+            NSLog(@"[Settings26] pane layout failed: %@", e);
+        }
+        gLGPaneReordering = NO;
+    });
+}
+
+#pragma mark - Battery card (level + bar) and iPad Storage search capsule
+
+static char kBatteryHeaderKey;
+static void LGBatteryHeader(UIViewController *vc) {
+    UITableView *tv = LGFind(vc.view, [UITableView class]);
+    if (!tv || tv.bounds.size.width < 300 || tv.isEditing) return;
+    UIDevice *d = UIDevice.currentDevice;
+    if (!d.batteryMonitoringEnabled) d.batteryMonitoringEnabled = YES;
+    float level = d.batteryLevel < 0 ? 0 : d.batteryLevel;
+    NSString *state = d.batteryState == UIDeviceBatteryStateCharging ? @"Charging"
+                    : d.batteryState == UIDeviceBatteryStateFull ? @"Fully Charged" : @"Not Charging";
+
+    UIView *wrap = objc_getAssociatedObject(tv, &kBatteryHeaderKey);
+    if (tv.tableHeaderView && tv.tableHeaderView != wrap && tv.tableHeaderView.bounds.size.height > 1) return; // page has its own header
+    if (!wrap) {
+        wrap = [UIView new];
+        UIView *card = [UIView new]; card.tag = 1;
+        card.backgroundColor = UIColor.secondarySystemGroupedBackgroundColor;
+        card.layer.cornerRadius = kSectionRadius;
+        card.layer.cornerCurve = kCACornerCurveContinuous;
+        [wrap addSubview:card];
+        UILabel *pct = [UILabel new]; pct.tag = 2; [card addSubview:pct];
+        UILabel *st = [UILabel new]; st.tag = 3; [card addSubview:st];
+        UIView *track = [UIView new]; track.tag = 4;
+        track.backgroundColor = [UIColor colorWithWhite:1 alpha:0.14];
+        track.layer.cornerRadius = 4;
+        [card addSubview:track];
+        UIView *fill = [UIView new]; fill.tag = 5;
+        fill.backgroundColor = [UIColor colorWithWhite:1 alpha:0.62];
+        fill.layer.cornerRadius = 4;
+        [track addSubview:fill];
+        UIImageView *info = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"info.circle.fill"]];
+        info.tag = 6; info.tintColor = UIColor.tertiaryLabelColor;
+        [card addSubview:info];
+        objc_setAssociatedObject(tv, &kBatteryHeaderKey, wrap, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    UIView *card = [wrap viewWithTag:1];
+    UILabel *pct = (UILabel *)[card viewWithTag:2], *st = (UILabel *)[card viewWithTag:3];
+    UIView *track = [card viewWithTag:4], *fill = [track viewWithTag:5], *info = [card viewWithTag:6];
+
+    NSMutableAttributedString *p = [[NSMutableAttributedString alloc]
+        initWithString:[NSString stringWithFormat:@"%d", (int)lroundf(level * 100)]
+            attributes:@{ NSFontAttributeName: [UIFont systemFontOfSize:40 weight:UIFontWeightBold],
+                          NSForegroundColorAttributeName: UIColor.labelColor }];
+    [p appendAttributedString:[[NSAttributedString alloc] initWithString:@"%" attributes:@{
+        NSFontAttributeName: [UIFont systemFontOfSize:22 weight:UIFontWeightBold], NSForegroundColorAttributeName: UIColor.labelColor }]];
+    if (![pct.attributedText isEqualToAttributedString:p]) pct.attributedText = p;
+    if (![st.text isEqualToString:state]) {
+        st.text = state;
+        st.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+        st.textColor = UIColor.secondaryLabelColor;
+    }
+
+    UITableViewCell *c0 = tv.visibleCells.firstObject;
+    CGFloat x = c0.bounds.size.width > 100 ? c0.frame.origin.x : 20;
+    CGFloat w = c0.bounds.size.width > 100 ? c0.frame.size.width : tv.bounds.size.width - 40;
+    CGFloat pad = 20;
+    pct.frame = CGRectMake(pad, 14, w - pad * 2 - 30, 52);
+    st.frame = CGRectMake(pad, 66, w - pad * 2, 20);
+    track.frame = CGRectMake(pad, 96, w - pad * 2, 8);
+    fill.frame = CGRectMake(0, 0, MAX(8, track.bounds.size.width * level), 8);
+    fill.backgroundColor = level <= 0.2 ? UIColor.systemRedColor : [UIColor colorWithWhite:1 alpha:0.62];
+    info.frame = CGRectMake(w - pad - 20, 16, 20, 20);
+    CGFloat ch = 124;
+    card.frame = CGRectMake(x, 24, w, ch);
+    CGFloat totalH = 24 + ch + 20;
+    if (tv.tableHeaderView != wrap || fabs(wrap.frame.size.height - totalH) > 1 || fabs(wrap.frame.size.width - tv.bounds.size.width) > 1) {
+        wrap.frame = CGRectMake(0, 0, tv.bounds.size.width, totalH);
+        tv.tableHeaderView = wrap;
+    }
+}
+
+static void LGStorageCapsule(UIViewController *vc) {
+    if (vc.navigationItem.rightBarButtonItem.customView.tag == 0x2612) return;
+    CGFloat W = 300;
+    UIView *cap = [[UIView alloc] initWithFrame:CGRectMake(0, 0, W, 44)];
+    cap.tag = 0x2612;
+    cap.backgroundColor = [UIColor colorWithRed:38/255.0 green:38/255.0 blue:40/255.0 alpha:1];
+    cap.layer.cornerRadius = 22;
+    cap.layer.borderWidth = 0.5;
+    cap.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.12].CGColor;
+    UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:17 weight:UIImageSymbolWeightRegular];
+    UIImageView *mag = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"magnifyingglass" withConfiguration:cfg]];
+    UIImageView *mic = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"mic" withConfiguration:cfg]];
+    mag.tintColor = UIColor.secondaryLabelColor; mic.tintColor = [UIColor colorWithWhite:0.92 alpha:1];
+    mag.frame = CGRectMake(16, 11, 22, 22); mic.frame = CGRectMake(W - 38, 11, 22, 22);
+    UILabel *ph = [[UILabel alloc] initWithFrame:CGRectMake(46, 0, W - 46 - 44, 44)];
+    ph.text = @"Applications"; ph.font = [UIFont systemFontOfSize:17]; ph.textColor = UIColor.secondaryLabelColor;
+    [cap addSubview:mag]; [cap addSubview:ph]; [cap addSubview:mic];
+    [cap.widthAnchor constraintEqualToConstant:W].active = YES;
+    [cap.heightAnchor constraintEqualToConstant:44].active = YES;
+    vc.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithCustomView:cap];
+}
+
+#pragma mark - Hooks that need Preferences classes
+
+%group LGPrefs
+
+%hook PSSplitViewController
+- (void)viewDidLayoutSubviews {
+    %orig;
+    LGStyleSidebar(self);
+    UIViewController *m = self.viewControllers.firstObject;
+    if ([m isKindOfClass:[UINavigationController class]]) {
+        UIViewController *root = ((UINavigationController *)m).viewControllers.firstObject;
+        if ([root isKindOfClass:NSClassFromString(@"PSUIPrefsListController")]) LGCheckReorder((PSListController *)root);
+    }
+}
+%end
+
+%subclass LGPaneController : PSListController
+- (void)setSpecifier:(PSSpecifier *)spec {
+    %orig;
+    NSString *want = spec.name ?: @"";
+    if (![objc_getAssociatedObject(self, &kPaneBuiltForKey) isEqualToString:want]) {
+        Ivar iv = class_getInstanceVariable(objc_getClass("PSListController"), "_specifiers");
+        if (iv) object_setIvarWithStrongDefault(self, iv, nil);
+        objc_setAssociatedObject(self, &kAppsFilterKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
+        UIViewController *me = (UIViewController *)self;
+        me.title = want;
+        me.navigationItem.title = want;
+        if (me.navigationItem.rightBarButtonItem.customView.tag == 0x2611) me.navigationItem.rightBarButtonItem = nil;
+        if (me.isViewLoaded) {
+            UITableView *tv = LGFind(me.view, [UITableView class]);
+            if (tv.backgroundView.tag == 0x2608) tv.backgroundView = nil;
+            if (tv.tableHeaderView && tv.tableHeaderView == objc_getAssociatedObject(tv, &kModeHeaderKey)) tv.tableHeaderView = nil;
+            if ([(id)self respondsToSelector:@selector(reloadSpecifiers)]) [(id)self reloadSpecifiers];
+        }
+    }
+}
+- (NSMutableArray *)specifiers {
+    Ivar iv = class_getInstanceVariable(objc_getClass("PSListController"), "_specifiers");
+    NSMutableArray *cur = iv ? object_getIvar(self, iv) : nil;
+    if (!cur && iv) {
+        cur = LGPaneSpecifiers((PSListController *)self);
+        object_setIvarWithStrongDefault(self, iv, cur);
+        objc_setAssociatedObject(self, &kPaneBuiltForKey, ((PSListController *)self).specifier.name ?: @"", OBJC_ASSOCIATION_COPY_NONATOMIC);
+    }
+    return cur ?: %orig;
+}
+%new
+- (id)lgValue:(PSSpecifier *)spec {
+    if (LGChoices()[spec.name ?: @""]) return LGChoiceValue(spec.name);
+    return [spec propertyForKey:@"lgValue"];
+}
+// choice lists: checkmark on the picked row, tap to pick
+- (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
+    UITableViewCell *c = %orig;
+    NSString *page = ((UIViewController *)self).title ?: @"";
+    if (LGChoices()[page]) {
+        c.accessoryType = [c.textLabel.text isEqualToString:LGChoiceValue(page)] ? UITableViewCellAccessoryCheckmark
+                                                                                 : UITableViewCellAccessoryNone;
+        c.selectionStyle = UITableViewCellSelectionStyleDefault;
+    }
+    return c;
+}
+- (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
+    NSString *page = ((UIViewController *)self).title ?: @"";
+    if (LGChoices()[page]) {
+        NSString *v = [tv cellForRowAtIndexPath:ip].textLabel.text;
+        if (v) [[[NSUserDefaults alloc] initWithSuiteName:@"com.basel.settings26.look"]
+                   setObject:v forKey:[@"LG26_choice_" stringByAppendingString:LGSlug(page)]];
+        [tv deselectRowAtIndexPath:ip animated:YES];
+        [tv reloadData];
+        return;
+    }
+    %orig;
+}
+%new
+- (id)lgGet:(PSSpecifier *)spec {
+    NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:@"com.basel.settings26.look"];
+    id v = [d objectForKey:spec.identifier];
+    return v ?: @YES;
+}
+%new
+- (void)lgSet:(id)value specifier:(PSSpecifier *)spec {
+    NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:@"com.basel.settings26.look"];
+    [d setObject:value forKey:spec.identifier];
+}
+// A-Z index on the right of "Apps"
+%new
+- (NSArray *)sectionIndexTitlesForTableView:(UITableView *)tv {
+    if (![((UIViewController *)self).title isEqualToString:@"Apps"]) return nil;
+    NSMutableArray *t = [NSMutableArray new];
+    for (char c = 'A'; c <= 'Z'; c++) [t addObject:[NSString stringWithFormat:@"%c", c]];
+    [t addObject:@"#"];
+    return t;
+}
+%new
+- (NSInteger)tableView:(UITableView *)tv sectionForSectionIndexTitle:(NSString *)title atIndex:(NSInteger)index {
+    // sections: 0 = Default Apps, then one per letter ("#" last), then Hidden Apps
+    NSMutableArray<NSString *> *names = [NSMutableArray new];
+    for (PSSpecifier *sp in [(PSListController *)self specifiers])
+        if (sp.cellType == 0) [names addObject:sp.name ?: @""];
+    NSInteger lastLetter = 0;
+    for (NSInteger i = 0; i < (NSInteger)names.count; i++) {
+        NSString *l = names[i];
+        if (l.length != 1) continue;
+        lastLetter = i;
+        BOOL hashL = [l isEqualToString:@"#"], hashT = [title isEqualToString:@"#"];
+        if (hashT ? hashL : (hashL || [l compare:title] != NSOrderedAscending)) return i;
+    }
+    return lastLetter;
+}
+%new
+- (void)lgFilterChanged:(UITextField *)tf {
+    objc_setAssociatedObject(self, &kAppsFilterKey, tf.text, OBJC_ASSOCIATION_COPY_NONATOMIC);
+    Ivar iv = class_getInstanceVariable(objc_getClass("PSListController"), "_specifiers");
+    if (iv) object_setIvarWithStrongDefault(self, iv, nil);
+    [(id)self reloadSpecifiers];
+}
+- (void)viewWillAppear:(BOOL)animated {
+    %orig;
+    UIViewController *me = (UIViewController *)self;
+    if (![me.title isEqualToString:@"Apps"]) {
+        if (me.navigationItem.rightBarButtonItem.customView.tag == 0x2611) me.navigationItem.rightBarButtonItem = nil;
+        return;
+    }
+    if (me.navigationItem.rightBarButtonItem.customView.tag == 0x2611) return;
+    // "Search Apps" capsule in the top-right corner
+    UIView *cap = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 330, 44)];
+    cap.tag = 0x2611;
+    cap.backgroundColor = [UIColor colorWithRed:38/255.0 green:38/255.0 blue:40/255.0 alpha:1];
+    cap.layer.cornerRadius = 22;
+    cap.layer.borderWidth = 0.5;
+    cap.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.12].CGColor;
+    UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:17 weight:UIImageSymbolWeightRegular];
+    UIImageView *mag = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"magnifyingglass" withConfiguration:cfg]];
+    UIImageView *mic = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"mic" withConfiguration:cfg]];
+    mag.tintColor = UIColor.secondaryLabelColor;
+    mic.tintColor = [UIColor colorWithWhite:0.92 alpha:1];
+    mag.frame = CGRectMake(16, 11, 22, 22); mag.contentMode = UIViewContentModeCenter;
+    mic.frame = CGRectMake(330 - 38, 11, 22, 22); mic.contentMode = UIViewContentModeCenter;
+    UITextField *tf = [[UITextField alloc] initWithFrame:CGRectMake(46, 0, 330 - 46 - 44, 44)];
+    tf.attributedPlaceholder = [[NSAttributedString alloc] initWithString:@"Search Apps"
+        attributes:@{ NSForegroundColorAttributeName: UIColor.secondaryLabelColor }];
+    tf.font = [UIFont systemFontOfSize:17];
+    tf.textColor = UIColor.labelColor;
+    tf.clearButtonMode = UITextFieldViewModeWhileEditing;
+    tf.returnKeyType = UIReturnKeySearch;
+    [tf addTarget:self action:@selector(lgFilterChanged:) forControlEvents:UIControlEventEditingChanged];
+    [cap addSubview:mag]; [cap addSubview:tf]; [cap addSubview:mic];
+    [cap.widthAnchor constraintEqualToConstant:330].active = YES;
+    [cap.heightAnchor constraintEqualToConstant:44].active = YES;
+    me.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithCustomView:cap];
+}
+- (void)viewDidLayoutSubviews {
+    %orig;
+    UIViewController *me = (UIViewController *)self;
+    if ([me.title isEqualToString:@"Apps"]) {
+        UITableView *tv = LGFind(me.view, [UITableView class]);
+        if (tv && ![tv.sectionIndexColor isEqual:UIColor.systemBlueColor]) {
+            tv.sectionIndexColor = UIColor.systemBlueColor;
+            tv.sectionIndexBackgroundColor = UIColor.clearColor;
+            tv.sectionIndexTrackingBackgroundColor = UIColor.clearColor;
+        }
+    }
+    UITableView *tv = LGFind(me.view, [UITableView class]);
+    if (!tv) return;
+    if ([me.title isEqualToString:@"Multitasking & Gestures"]) LGMultitaskingHeader(me);
+    else if (tv.tableHeaderView && tv.tableHeaderView == objc_getAssociatedObject(tv, &kModeHeaderKey)) tv.tableHeaderView = nil;
+    if (![me.title isEqualToString:@"Hidden Apps"]) {
+        if (tv.backgroundView.tag == 0x2608) tv.backgroundView = nil;
+        return;
+    }
+    // "Hidden Apps": big centred empty state like iPadOS 26
+    if (tv.backgroundView.tag == 0x2608) return;
+    UIView *bg = [UIView new];
+    bg.tag = 0x2608;
+    UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:56 weight:UIImageSymbolWeightRegular];
+    UIImageView *iv = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"square.stack.3d.up.slash" withConfiguration:cfg]];
+    iv.tintColor = UIColor.secondaryLabelColor;
+    UILabel *l = [UILabel new];
+    l.text = @"No Hidden Apps";
+    l.font = [UIFont systemFontOfSize:30 weight:UIFontWeightBold];
+    l.textColor = UIColor.labelColor;
+    UIStackView *st = [[UIStackView alloc] initWithArrangedSubviews:@[iv, l]];
+    st.axis = UILayoutConstraintAxisVertical;
+    st.alignment = UIStackViewAlignmentCenter;
+    st.spacing = 14;
+    st.translatesAutoresizingMaskIntoConstraints = NO;
+    [bg addSubview:st];
+    [NSLayoutConstraint activateConstraints:@[[st.centerXAnchor constraintEqualToAnchor:bg.centerXAnchor],
+                                              [st.centerYAnchor constraintEqualToAnchor:bg.centerYAnchor constant:-40]]];
+    tv.backgroundView = bg;
+}
+%end
+
+%hook PSListController
+- (NSMutableArray *)specifiers {
+    NSMutableArray *s = %orig;
+    if (!gLGPaneReordering) LGCheckPane(self);
+    return s;
+}
+- (void)viewDidLayoutSubviews {
+    %orig;
+    LGCheckPane(self);
+}
+%end
+
+%hook PSUIPrefsListController
+// iPadOS 26 keeps sidebar groups close together
+- (CGFloat)tableView:(UITableView *)tv heightForHeaderInSection:(NSInteger)section {
+    if (!LGSidebarEnabled()) return %orig;
+    if (tv.sectionHeaderTopPadding != 0) tv.sectionHeaderTopPadding = 0;
+    return section == 0 ? %orig : 14.0;
+}
+- (CGFloat)tableView:(UITableView *)tv heightForFooterInSection:(NSInteger)section {
+    if (!LGSidebarEnabled()) return %orig;
+    return CGFLOAT_MIN;
+}
+- (UIView *)tableView:(UITableView *)tv viewForFooterInSection:(NSInteger)section {
+    return LGSidebarEnabled() ? nil : %orig;
+}
+- (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
+    UITableViewCell *c = [tv cellForRowAtIndexPath:ip];
+    PSSpecifier *acct = gLGAccountSpec;
+    if (acct && [c.textLabel.text isEqualToString:@"iCloud"]) {
+        NSIndexPath *ap = nil;
+        if ([self respondsToSelector:@selector(indexPathForSpecifier:)])
+            ap = ((NSIndexPath *(*)(id, SEL, id))objc_msgSend)(self, @selector(indexPathForSpecifier:), acct);
+        if (ap && ap.section < tv.numberOfSections && ap.row < [tv numberOfRowsInSection:ap.section]) {
+            %orig(tv, ap);
+            [tv selectRowAtIndexPath:ip animated:NO scrollPosition:UITableViewScrollPositionNone];
+            return;
+        }
+    }
+    %orig;
+}
+- (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)section {
+    NSInteger n = %orig;
+    LGCheckReorder(self);
+    return n;
+}
+- (NSMutableArray *)specifiers {
+    NSMutableArray *s = %orig;
+    if (gLGReordering || !LGSidebarEnabled() || !s.count) return s;
+    NSNumber *mark = objc_getAssociatedObject(s, &kReorderMarkKey);
+    if (mark && mark.unsignedIntegerValue == LGSpecSignature(s)) return s;
+    LGScheduleReorder(self);
+    return s;
+}
+- (void)viewWillAppear:(BOOL)animated {
+    %orig;
+    self.navigationItem.titleView = [UIView new]; // no "Settings" title above search
+    self.navigationItem.hidesSearchBarWhenScrolling = NO; // search stays pinned like iPadOS 26
+    UISearchController *sc = self.navigationItem.searchController;
+    if (sc) objc_setAssociatedObject(sc, &kSidebarSCKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+%end
+
+%end
+
+#pragma mark - Generic UIKit hooks (Settings only, via filter plist)
+
+static char kTitleCasedKey;
+// "SEARCH AND LOOK UP" -> "Search and Look Up", "USE FACE ID FOR:" -> "Use Face ID For:"
+static NSString *LGTitleCase(NSString *t) {
+    static NSSet *small, *keep;
+    static NSDictionary *special, *renames;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        small = [NSSet setWithArray:@[@"and", @"or", @"of", @"to", @"the", @"in", @"on", @"a", @"an", @"by", @"at"]];
+        keep = [NSSet setWithArray:@[@"ID", @"VPN", @"USB", @"SIM", @"NFC", @"TV", @"DNS", @"IP", @"SOS", @"FM", @"HDR", @"MMS", @"SMS", @"RTT", @"TTY", @"CPU", @"GB", @"MB", @"KB"]];
+        special = @{ @"ipad": @"iPad", @"iphone": @"iPhone", @"icloud": @"iCloud", @"airpods": @"AirPods",
+                     @"airplay": @"AirPlay", @"airdrop": @"AirDrop", @"facetime": @"FaceTime", @"imessage": @"iMessage",
+                     @"carplay": @"CarPlay", @"homekit": @"HomeKit", @"wi-fi": @"Wi-Fi", @"ipados": @"iPadOS" };
+        renames = @{ @"Networks": @"Other Networks" }; // Wi-Fi list name in iPadOS 26
+    });
+    NSArray *words = [t componentsSeparatedByString:@" "];
+    NSMutableArray *out = [NSMutableArray new];
+    for (NSUInteger i = 0; i < words.count; i++) {
+        NSString *w = words[i];
+        NSString *core = [w stringByTrimmingCharactersInSet:NSCharacterSet.punctuationCharacterSet];
+        NSString *lower = w.lowercaseString;
+        NSString *lowerCore = core.lowercaseString;
+        NSString *o;
+        if ([keep containsObject:core]) o = w;
+        else if (special[lowerCore]) o = [w.lowercaseString stringByReplacingOccurrencesOfString:lowerCore withString:special[lowerCore]];
+        else if (i > 0 && [small containsObject:lowerCore]) o = lower;
+        else o = lower.length ? [[lower substringToIndex:1].uppercaseString stringByAppendingString:[lower substringFromIndex:1]] : lower;
+        [out addObject:o];
+    }
+    NSString *r = [out componentsJoinedByString:@" "];
+    return renames[r] ?: r;
+}
+
+static void LGTitleCaseHeaders(UITableView *tv) {
+    if (tv.style == UITableViewStylePlain || LGIsSidebarTable(tv)) return;
+    for (UIView *sub in tv.subviews) {
+        if ([sub isKindOfClass:[UITableViewCell class]] || sub == tv.tableHeaderView) continue;
+        NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:sub];
+        while (stack.count) {
+            UIView *v = stack.lastObject;
+            [stack removeLastObject];
+            [stack addObjectsFromArray:v.subviews];
+            if (![v isKindOfClass:[UILabel class]]) continue;
+            UILabel *l = (UILabel *)v;
+            NSString *t = l.text;
+            // Bluetooth footer wording of iPadOS 26
+            if ([t hasPrefix:@"Now discoverable as"]) {
+                NSString *nt = [NSString stringWithFormat:@"This iPad is discoverable as \u201C%@\u201D while Bluetooth Settings is open.",
+                                UIDevice.currentDevice.name];
+                if (![t isEqualToString:nt]) { l.text = nt; [l.superview setNeedsLayout]; }
+                continue;
+            }
+            if (t.length < 2 || ![t isEqualToString:t.uppercaseString] ||
+                [t rangeOfCharacterFromSet:NSCharacterSet.lowercaseLetterCharacterSet].location != NSNotFound ||
+                [t rangeOfCharacterFromSet:NSCharacterSet.uppercaseLetterCharacterSet].location == NSNotFound) continue;
+            if (l.font.pointSize > 15) continue; // only the small caps-style section titles
+            NSString *fixed = LGTitleCase(t);
+            if ([objc_getAssociatedObject(l, &kTitleCasedKey) isEqualToString:fixed]) continue;
+            objc_setAssociatedObject(l, &kTitleCasedKey, fixed, OBJC_ASSOCIATION_COPY_NONATOMIC);
+            l.text = fixed;
+            l.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
+            l.textColor = UIColor.secondaryLabelColor;
+            [l sizeToFit];
+        }
+    }
+}
+
+static const NSInteger kSubtitleTag = 0x2610;
+static void LGApplySubtitle(UITableViewCell *cell) {
+    PSSpecifier *sp = [cell respondsToSelector:@selector(specifier)] ? [(id)cell specifier] : nil;
+    NSString *sub = [sp respondsToSelector:@selector(propertyForKey:)] ? [sp propertyForKey:@"lgSubtitle"] : nil;
+    UILabel *l = (UILabel *)[cell.contentView viewWithTag:kSubtitleTag];
+    if (!sub.length) { if (l && !l.hidden) l.hidden = YES; return; }
+    if (!l) {
+        l = [UILabel new];
+        l.tag = kSubtitleTag;
+        l.font = [UIFont systemFontOfSize:14];
+        l.textColor = UIColor.secondaryLabelColor;
+        [cell.contentView addSubview:l];
+    }
+    l.hidden = NO;
+    if (![l.text isEqualToString:sub]) l.text = sub;
+    UILabel *t = cell.textLabel;
+    if (!t) return;
+    CGRect tf = t.frame;
+    CGFloat lineH = ceil(l.font.lineHeight);
+    CGFloat total = tf.size.height + 2 + lineH;
+    CGFloat top = floor((cell.contentView.bounds.size.height - total) / 2.0);
+    if (fabs(tf.origin.y - top) > 0.5) { tf.origin.y = top; t.frame = tf; }
+    CGRect sf = CGRectMake(tf.origin.x, top + tf.size.height + 2, cell.contentView.bounds.size.width - tf.origin.x - 16, lineH);
+    if (!CGRectEqualToRect(l.frame, sf)) l.frame = sf;
+}
+
+static BOOL LGInDetailColumn(UIViewController *vc) {
+    UINavigationController *nav = vc.navigationController;
+    UISplitViewController *split = nav.splitViewController;
+    return split && split.viewControllers.count >= 2 && nav == split.viewControllers.lastObject;
+}
+
+%hook UIViewController
+- (void)viewWillAppear:(BOOL)animated {
+    %orig;
+    if (LGInDetailColumn(self)) LGInstallBackButton(self);
+}
+- (void)viewDidLayoutSubviews {
+    %orig;
+    if (!LGInDetailColumn(self)) return;
+    LGApplyHeader(self);
+    NSString *t = LGNormalizeTitle(self.title ?: @"");
+    if ([t isEqualToString:@"Battery"]) LGBatteryHeader(self);
+    if ([t isEqualToString:@"iPad Storage"]) LGStorageCapsule(self);
+}
+- (void)viewDidAppear:(BOOL)animated {
+    %orig;
+    if (LGInDetailColumn(self)) LGApplyHeader(self);
+}
+%end
+
+%hook UITableView
+- (void)layoutSubviews {
+    %orig;
+    UIView *mine = objc_getAssociatedObject(self, &kHeaderKey);
+    if (mine && self.tableHeaderView != mine && !self.isEditing && !objc_getAssociatedObject(self, &kHeaderPendingKey)) {
+        objc_setAssociatedObject(self, &kHeaderPendingKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        __weak UITableView *wtv = self;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            UITableView *t = wtv;
+            if (!t) return;
+            objc_setAssociatedObject(t, &kHeaderPendingKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            UIViewController *o = LGOwnerVC(t);
+            if (o) LGApplyHeader(o);
+        });
+    }
+    LGTitleCaseHeaders(self);
+}
+// iPadOS 16 Settings centres a narrow table in wide panes (FLEX: table ~690pt in a ~950pt pane)
+- (void)setFrame:(CGRect)f {
+    UIView *sv = self.superview;
+    if (sv && self.style != UITableViewStylePlain && f.size.width > 100 &&
+        f.size.width < sv.bounds.size.width - 2.0 && f.origin.x > 1.0) {
+        UIViewController *vc = LGOwnerVC(self);
+        if (vc && vc.view == sv && LGInDetailColumn(vc) && !LGIsSidebarTable(self)) {
+            f.origin.x = 0;
+            f.size.width = sv.bounds.size.width;
+        }
+    }
+    %orig(f);
+}
+// ...and some panes do it with readable-width margins instead
+- (void)setLayoutMargins:(UIEdgeInsets)m {
+    if (self.style != UITableViewStylePlain && (m.left > 40 || m.right > 40)) {
+        UIViewController *vc = LGOwnerVC(self);
+        if (vc && LGInDetailColumn(vc)) { m.left = MIN(m.left, 20); m.right = MIN(m.right, 20); }
+    }
+    %orig(m);
+}
+- (void)setDirectionalLayoutMargins:(NSDirectionalEdgeInsets)m {
+    if (self.style != UITableViewStylePlain && (m.leading > 40 || m.trailing > 40)) {
+        UIViewController *vc = LGOwnerVC(self);
+        if (vc && LGInDetailColumn(vc)) { m.leading = MIN(m.leading, 20); m.trailing = MIN(m.trailing, 20); }
+    }
+    %orig(m);
+}
+- (BOOL)cellLayoutMarginsFollowReadableWidth {
+    if (!%orig) return NO;
+    if (self.style == UITableViewStylePlain) return YES;
+    UIViewController *vc = LGOwnerVC(self);
+    return (vc && LGInDetailColumn(vc)) ? NO : YES; // detail panes span the column like iPadOS 26
+}
+%end
+
+%hook UITableViewCell
+
+- (void)setFrame:(CGRect)f {
+    UITableView *tv = (UITableView *)self.superview;
+    if (![tv isKindOfClass:[UITableView class]]) tv = LGTableViewFor(self);
+    if (tv && f.origin.x > 30 && f.size.width > 300 && LGWideTable(tv)) {
+        CGFloat W = tv.bounds.size.width;
+        // leave room for an A-Z index (Apps page), like the reference
+        UIViewController *src = [(id)tv.dataSource isKindOfClass:[UIViewController class]] ? (UIViewController *)tv.dataSource : nil;
+        BOOL hasIndex = [src isKindOfClass:NSClassFromString(@"LGPaneController")] && [src.title isEqualToString:@"Apps"];
+        f.origin.x = kSectionSide;
+        f.size.width = W - kSectionSide * 2 - (hasIndex ? 16.0 : 0);
+        if (!objc_getAssociatedObject(tv, &kWideFallbackKey))
+            objc_setAssociatedObject(tv, &kWideFallbackKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    %orig(f);
+}
+
+- (void)layoutSubviews {
+    %orig;
+    UITableView *tv = LGTableViewFor(self);
+    if (!tv || tv.style == UITableViewStylePlain) return;
+
+    if (LGIsSidebarTable(tv)) { LGStyleSidebarCell(self); return; }
+    LGApplySubtitle(self);
+
+    NSIndexPath *ip = [tv indexPathForCell:self];
+    if (!ip) return;
+
+    // Keep the header card aligned with the sections below it
+    if (ip.section == 0 && ip.row == 0 && tv.tableHeaderView.tag == kHeaderWrapTag) {
+        UIView *wrapV = tv.tableHeaderView;
+        UIView *card = [wrapV viewWithTag:1];
+        CGRect cr = [self convertRect:self.bounds toView:wrapV];
+        BOOL mergedGap = objc_getAssociatedObject(tv, &kHeaderMergeKey) && fabs(CGRectGetMaxY(card.frame) - cr.origin.y) > 0.5;
+        if (fabs(card.frame.origin.x - cr.origin.x) > 0.5 ||
+            fabs(card.frame.size.width - cr.size.width) > 0.5 || mergedGap) {
+            UIViewController *owner = LGOwnerVC(tv);
+            dispatch_async(dispatch_get_main_queue(), ^{ if (owner) LGApplyHeader(owner); });
+        }
+    }
+
+    NSInteger rows = [tv numberOfRowsInSection:ip.section];
+    CACornerMask mask = 0;
+    BOOL mergedTop = ip.section == 0 && objc_getAssociatedObject(tv, &kHeaderMergeKey) &&
+                     tv.tableHeaderView.tag == kHeaderWrapTag;
+    if (ip.row == 0 && !mergedTop) mask |= kCALayerMinXMinYCorner | kCALayerMaxXMinYCorner;
+    if (ip.row == rows - 1) mask |= kCALayerMinXMaxYCorner | kCALayerMaxXMaxYCorner;
+    self.layer.maskedCorners = mask;
+    self.layer.cornerCurve   = kCACornerCurveContinuous;
+    self.layer.cornerRadius  = mask ? kSectionRadius : 0;
+    self.layer.masksToBounds = (mask != 0);
+
+    LGApplyRowIcon(self, tv);
+}
+
+- (void)setSelected:(BOOL)selected animated:(BOOL)animated {
+    %orig;
+    if (LGIsSidebarTable(LGTableViewFor(self))) LGStyleSidebarCell(self);
+}
+
+- (void)setHighlighted:(BOOL)highlighted animated:(BOOL)animated {
+    %orig;
+    if (LGIsSidebarTable(LGTableViewFor(self))) LGStyleSidebarCell(self);
+}
+
+- (void)updateConfigurationUsingState:(UICellConfigurationState *)state {
+    %orig;
+    if (LGIsSidebarTable(LGTableViewFor(self))) LGApplyClearBackground(self);
+}
+
+%end
+
+%hook UITableViewHeaderFooterView
+- (void)layoutSubviews {
+    %orig;
+    UITableView *tv = LGTableViewFor(self);
+    if (!tv || tv.style == UITableViewStylePlain || LGIsSidebarTable(tv)) return;
+
+    if (objc_getAssociatedObject(tv, &kWideFallbackKey)) {
+        CGFloat targetX = kSectionSide + 20.0; // text sits 20pt inside the card, like the reference
+        NSMutableArray<UIView *> *st = [NSMutableArray arrayWithObject:self];
+        while (st.count) {
+            UIView *v = st.lastObject; [st removeLastObject];
+            [st addObjectsFromArray:v.subviews];
+            if (![v isKindOfClass:[UILabel class]] && ![v isKindOfClass:[UITextView class]]) continue;
+            CGFloat lx = [v convertPoint:CGPointZero toView:tv].x;
+            CGFloat dx = lx - targetX;
+            if (dx > 2) {
+                CGRect fr = v.frame;
+                fr.origin.x -= dx;
+                fr.size.width = MIN(fr.size.width + dx * 2, tv.bounds.size.width - targetX * 2);
+                v.frame = fr;
+            }
+        }
+    }
+
+    UIFont *font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
+    if ([self.contentConfiguration isKindOfClass:[UIListContentConfiguration class]]) {
+        UIListContentConfiguration *c = (UIListContentConfiguration *)self.contentConfiguration;
+        NSString *txt = c.text;
+        BOOL isHeader = txt.length && c.textProperties.transform == UIListContentTextTransformUppercase;
+        if (isHeader) {
+            UIListContentConfiguration *n = [c copy];
+            n.textProperties.transform = UIListContentTextTransformNone;
+            n.textProperties.font = font;
+            n.textProperties.color = UIColor.secondaryLabelColor;
+            if ([txt isEqualToString:txt.uppercaseString]) n.text = LGTitleCase(txt);
+            self.contentConfiguration = n;
+        }
+        return;
+    }
+
+    UILabel *l = self.textLabel;
+    NSString *txt = l.text;
+    // Only headers come out ALL CAPS on iPadOS 16; footers keep normal case and are left alone
+    if (txt.length > 1 && [txt isEqualToString:txt.uppercaseString] &&
+        [txt rangeOfCharacterFromSet:NSCharacterSet.letterCharacterSet].location != NSNotFound) {
+        l.text = LGTitleCase(txt);
+        l.font = font;
+        l.textColor = UIColor.secondaryLabelColor;
+        [l sizeToFit];
+    }
+}
+%end
+
+%hook UISwitch
+- (void)didAddSubview:(UIView *)v {
+    %orig;
+    if (v.tag != kSwitchOverlayTag) LGStyleSwitch(self, NO);
+}
+- (void)didMoveToWindow {
+    %orig;
+    LGStyleSwitch(self, NO);
+}
+- (void)traitCollectionDidChange:(UITraitCollection *)prev {
+    %orig;
+    LGStyleSwitch(self, NO);
+}
+- (void)layoutSubviews {
+    %orig;
+    LGStyleSwitch(self, NO);
+}
+- (void)setOn:(BOOL)on animated:(BOOL)animated {
+    %orig;
+    LGStyleSwitch(self, animated);
+}
+- (void)setEnabled:(BOOL)enabled {
+    %orig;
+    LGStyleSwitch(self, NO);
+}
+%end
+
+static void LGHideCancel(UISearchBar *sb) {
+    UIView *tf = sb.searchTextField;
+    NSMutableArray<UIView *> *stack = [sb.subviews mutableCopy];
+    while (stack.count) {
+        UIView *v = stack.lastObject;
+        [stack removeLastObject];
+        if (v == tf) continue;
+        if ([v isKindOfClass:[UIButton class]] || [NSStringFromClass(v.class) containsString:@"NavigationButton"]) {
+            if (!v.hidden) v.hidden = YES;
+            if (v.userInteractionEnabled) v.userInteractionEnabled = NO;
+            continue;
+        }
+        [stack addObjectsFromArray:v.subviews];
+    }
+    tf.frame = tf.frame; // re-run the field geometry rules below
+}
+
+%hook UISearchTextField
+- (void)setFrame:(CGRect)f {
+    if (f.size.width > 1 && LGIsSidebarSearch(self)) {
+        if (fabs(f.size.height - kSearchHeight) > 0.5) {
+            f.origin.y += (f.size.height - kSearchHeight) / 2.0;
+            f.size.height = kSearchHeight;
+        }
+        // Cancel is hidden, so the field keeps its full width
+        CGFloat full = self.superview.bounds.size.width - 2.0 * f.origin.x;
+        if (full > f.size.width + 0.5) f.size.width = full;
+    }
+    %orig(f);
+}
+%end
+
+%hook UISearchBar
+- (void)layoutSubviews {
+    %orig;
+    if (self.window && LGIsSidebarSearch(self)) { LGStyleSearchBar(self); LGHideCancel(self); }
+}
+- (void)setShowsCancelButton:(BOOL)show animated:(BOOL)animated {
+    if (LGIsSidebarSearch(self)) show = NO;
+    %orig(show, animated);
+}
+- (void)setShowsCancelButton:(BOOL)show {
+    if (LGIsSidebarSearch(self)) show = NO;
+    %orig(show);
+}
+- (BOOL)showsCancelButton {
+    return LGIsSidebarSearch(self) ? NO : %orig;
+}
+%end
+
+%hook UISearchController
+- (BOOL)automaticallyShowsCancelButton {
+    return objc_getAssociatedObject(self, &kSidebarSCKey) ? NO : %orig;
+}
+- (BOOL)hidesNavigationBarDuringPresentation {
+    return objc_getAssociatedObject(self, &kSidebarSCKey) ? NO : %orig; // field stays where it is
+}
+%end
+
+%hook UINavigationBar
+- (void)layoutSubviews {
+    %orig;
+    if (!self.window || objc_getAssociatedObject(self, &kSidebarBarKey) || !LGIsDetailBar(self)) return;
+    if (objc_getAssociatedObject(self, &kNavWrapPendingKey)) return;
+    objc_setAssociatedObject(self, &kNavWrapPendingKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    __weak UINavigationBar *wb = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UINavigationBar *b = wb;
+        if (!b) return;
+        objc_setAssociatedObject(b, &kNavWrapPendingKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        LGWrapNavItem(b.topItem);
+    });
+}
+- (void)didMoveToWindow {
+    %orig;
+    if (!self.window) return;
+    self.prefersLargeTitles = NO;
+    if (objc_getAssociatedObject(self, &kSidebarBarKey)) return;
+
+    UIImage *back = LGBackImage();
+
+    UINavigationBarAppearance *edge = [UINavigationBarAppearance new];
+    [edge configureWithTransparentBackground];
+    [edge setBackIndicatorImage:back transitionMaskImage:back];
+
+    UINavigationBarAppearance *std = [UINavigationBarAppearance new];
+    [std configureWithTransparentBackground];
+    std.backgroundEffect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterialDark];
+    std.backgroundColor = [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *tc) {
+        return tc.userInterfaceStyle == UIUserInterfaceStyleDark ? [UIColor colorWithWhite:0 alpha:0.82]
+                                                                 : [UIColor colorWithWhite:1 alpha:0.82];
+    }];
+    std.shadowColor = UIColor.clearColor;
+    [std setBackIndicatorImage:back transitionMaskImage:back];
+
+    self.standardAppearance   = std;
+    self.compactAppearance    = std;
+    self.scrollEdgeAppearance = edge;
+}
+%end
+
+%hook UINavigationItem
+- (UINavigationItemLargeTitleDisplayMode)largeTitleDisplayMode {
+    return UINavigationItemLargeTitleDisplayModeNever;
+}
+- (UINavigationItemBackButtonDisplayMode)backButtonDisplayMode {
+    return UINavigationItemBackButtonDisplayModeMinimal;
+}
+%end
+
+%ctor {
+    %init;
+    Class tvc = [UITableView class];
+    SEL setSel = sel_registerName("_setSectionContentInset:"), getSel = sel_registerName("_sectionContentInset");
+    if (class_getInstanceMethod(tvc, setSel)) MSHookMessageEx(tvc, setSel, (IMP)new_setSecInset, (IMP *)&orig_setSecInset);
+    if (class_getInstanceMethod(tvc, getSel)) MSHookMessageEx(tvc, getSel, (IMP)new_secInset, (IMP *)&orig_secInset);
+    if (NSClassFromString(@"PSSplitViewController") && NSClassFromString(@"PSListController") &&
+        NSClassFromString(@"PSUIPrefsListController")) {
+        %init(LGPrefs);
+    }
+}
