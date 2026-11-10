@@ -1,6 +1,6 @@
 Package: com.basel.liquidsettings
 Name: LiquidSettings
-Version: 1.9.9
+Version: 2.0.0
 Architecture: iphoneos-arm64
 Description: iPadOS 26 Liquid Glass look for Settings (iPadOS 16)
 Maintainer: Basel
